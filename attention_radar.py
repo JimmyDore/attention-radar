@@ -1,6 +1,6 @@
-"""Menu bar inbox: Claude Code sessions in Superset (Paradev) that wait for you.
+"""Menu bar inbox: Claude Code sessions in Paradev (formerly Superset) that wait for you.
 
-Reads only: the Superset CLI and host database, Claude Code session files and transcripts,
+Reads only: the Paradev CLI and host database, Claude Code session files and transcripts,
 and optional orchestrator records. Writes only: the snooze file. Never sends anything to a session.
 """
 import datetime as dt
@@ -21,8 +21,8 @@ CONFIG_FILE = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.join(HOM
                            "attention-radar", "config.json")
 STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME") or os.path.join(HOME, ".local", "state"),
                          "attention-radar")
-CLI_CANDIDATES = ["~/.paradev/bin/superset", "~/.superset/bin/superset"]
-CLI_NAMES = ["superset", "paradev"]
+CLI_CANDIDATES = ["~/.paradev/bin/paradev", "~/.paradev/bin/superset", "~/.superset/bin/superset"]
+CLI_NAMES = ["paradev", "superset"]
 
 TAIL_BYTES = 512 * 1024
 EXCERPT_CHARS = 90
@@ -38,7 +38,7 @@ HIDDEN = "hidden"
 @dataclass
 class Config:
     language: str = "en"
-    superset_cli: str = ""
+    paradev_cli: str = ""
     claude_dir: str = ""
     host_dbs: List[str] = field(default_factory=lambda: ["~/.paradev/host/*/host.db", "~/.superset/host/*/host.db"])
     stale_after_minutes: int = 60
@@ -55,13 +55,13 @@ class Config:
 
     @property
     def cli(self):
-        if self.superset_cli:
-            return os.path.expanduser(self.superset_cli)
+        if self.paradev_cli:
+            return os.path.expanduser(self.paradev_cli)
         for path in map(os.path.expanduser, CLI_CANDIDATES):
             if os.access(path, os.X_OK):
                 return path
         found = [shutil.which(name) for name in CLI_NAMES]
-        return next((path for path in found if path), "superset")
+        return next((path for path in found if path), "paradev")
 
 
 def load_config(path=None):
@@ -92,7 +92,7 @@ TEXTS = {
         "no_text": "(no text)",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
-        "snapshot_failed": "superset snapshot failed",
+        "snapshot_failed": "paradev snapshot failed",
         "units": ("min", "h", "d"),
         "urgency": ("blocked: dialog or failure", "under 1 h", "1 to 24 h", "over 24 h: finished?"),
     },
@@ -109,7 +109,7 @@ TEXTS = {
         "no_text": "(pas de texte)",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
-        "snapshot_failed": "superset snapshot a échoué",
+        "snapshot_failed": "paradev snapshot a échoué",
         "units": ("min", "h", "j"),
         "urgency": ("bloquée : dialogue ou échec", "moins d'1 h", "1 à 24 h", "plus de 24 h : finie ?"),
     },
@@ -300,7 +300,7 @@ def save_snooze(terminal_id, activity, now, path=None, until=None):
 
 
 def load_sessions():
-    """Live sessions keyed by Superset terminal id."""
+    """Live sessions keyed by Paradev terminal id."""
     files = {}
     for path in glob.glob(os.path.join(CONFIG.claude, "sessions", "*.json")):
         try:
@@ -318,7 +318,7 @@ def load_sessions():
     sessions = {}
     for line in output.splitlines():
         match = re.match(r"\s*(\d+)\s", line)
-        terminal = re.search(r"\bSUPERSET_TERMINAL_ID=(\S+)", line)
+        terminal = re.search(r"\b(?:PARADEV|SUPERSET)_TERMINAL_ID=(\S+)", line)
         if not (match and terminal):
             continue
         session = files.get(int(match.group(1)))
@@ -380,7 +380,7 @@ def load_orchestrators(root=None):
 
 
 def running_workspaces(snapshot, sessions):
-    """Workspaces where at least one Claude is working: session busy or shell, or Superset says working."""
+    """Workspaces where at least one Claude is working: session busy or shell, or Paradev says working."""
     running = set()
     for workspace in snapshot.get("workspaces", []):
         for terminal in workspace.get("terminals", []):
@@ -624,7 +624,7 @@ def load_snapshot():
 def doctor():
     """Print what the radar found, for a first install."""
     print(f"config file      {CONFIG_FILE} ({'found' if os.path.exists(CONFIG_FILE) else 'not found, defaults'})")
-    print(f"superset cli     {CONFIG.cli}")
+    print(f"paradev cli      {CONFIG.cli}")
     print(f"claude dir       {CONFIG.claude}")
     print(f"host databases   {', '.join(host_db_paths()) or 'none found (failed turns will not show)'}")
     print(f"orchestrators    {CONFIG.orchestrators_dir or 'off'}")

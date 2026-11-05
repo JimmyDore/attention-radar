@@ -30,7 +30,7 @@ class Classify(Base):
     def test_idle_with_nothing_running_needs_you(self):
         self.assertEqual(self.verdict().bucket, ar.NEEDS)
 
-    def test_background_shell_or_subagent_is_hidden_even_if_superset_says_idle(self):
+    def test_background_shell_or_subagent_is_hidden_even_if_paradev_says_idle(self):
         self.assertEqual(self.verdict(status="shell").bucket, ar.HIDDEN)
         self.assertEqual(self.verdict(status="busy").bucket, ar.HIDDEN)
 
@@ -65,7 +65,7 @@ class Classify(Base):
         self.assertEqual(self.verdict(failed=True).kind, "failed")
         self.assertEqual(self.verdict(status="busy", failed=True).bucket, ar.HIDDEN)
 
-    def test_without_session_file_falls_back_on_superset_state(self):
+    def test_without_session_file_falls_back_on_paradev_state(self):
         self.assertEqual(self.verdict(state="working", status=None).bucket, ar.HIDDEN)
         self.assertEqual(self.verdict(state="idle", status=None).bucket, ar.NEEDS)
 
@@ -387,7 +387,7 @@ class Settings(Base):
                          read=lambda s: t(last_ts=NOW - 60), subagents=lambda s: None)
         self.assertEqual(radar.rows, [])
 
-    def test_demo_menu_needs_no_superset(self):
+    def test_demo_menu_needs_no_paradev(self):
         out = ar.render(ar.demo_radar(NOW), "/p", NOW)
         self.assertTrue(out.splitlines()[0].endswith("sfimage=tray.full"))
 

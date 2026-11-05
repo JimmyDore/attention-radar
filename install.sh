@@ -37,7 +37,7 @@ fi
 echo
 /usr/bin/python3 -B "$REPO/attention_radar.py" doctor || {
   echo
-  echo "The radar can't see your sessions yet. Is Superset (Paradev) running, with Claude Code in a terminal?"
+  echo "The radar can't see your sessions yet. Is Paradev running, with Claude Code in a terminal?"
 }
 
 open -g "swiftbar://refreshallplugins" 2>/dev/null || open -a SwiftBar
