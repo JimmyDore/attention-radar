@@ -2,6 +2,8 @@
 
 A macOS menu bar inbox of the Claude Code sessions in [Paradev](https://superset.sh) (formerly Superset) that are waiting for you.
 
+<img src="docs/screenshot.png" alt="The attention-radar menu: sessions grouped by project, with the hovered one showing its last message" width="720">
+
 ## Why
 
 With ten worktrees open, the Paradev sidebar shows a lot of sessions as idle. Some of them really wait for an answer from you. Others look idle but are waiting on a background subagent, a shell, a `Monitor`, a scheduled wakeup or another agent. You can only tell them apart by opening each one.
