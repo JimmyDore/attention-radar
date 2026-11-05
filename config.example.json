@@ -1,0 +1,12 @@
+{
+  "language": "en",
+  "stale_after_minutes": 60,
+  "morning_hour": 9,
+  "snooze_hours": [12, 18],
+  "ignore_projects": [],
+  "superset_cli": "",
+  "claude_dir": "",
+  "host_dbs": ["~/.paradev/host/*/host.db", "~/.superset/host/*/host.db"],
+  "orchestrators_dir": "",
+  "demo": false
+}
