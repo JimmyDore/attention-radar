@@ -349,6 +349,11 @@ class Settings(Base):
             config = ar.load_config(self.write(folder, {"language": "fr", "stale_after_minutes": 30}))
         self.assertEqual((config.language, config.stale_after_minutes, config.morning_hour), ("fr", 30, 9))
 
+    def test_old_superset_cli_key_still_works(self):
+        with tempfile.TemporaryDirectory() as folder:
+            config = ar.load_config(self.write(folder, {"superset_cli": "/bin/superset"}))
+        self.assertEqual(config.cli, "/bin/superset")
+
     def test_unknown_key_is_an_error_not_silence(self):
         with tempfile.TemporaryDirectory() as folder:
             with self.assertRaises(ValueError):

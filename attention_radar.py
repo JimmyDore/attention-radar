@@ -71,6 +71,8 @@ def load_config(path=None):
         return Config()
     with open(path) as handle:
         data = json.load(handle)
+    if "superset_cli" in data:  # the key's name before the app became Paradev
+        data.setdefault("paradev_cli", data.pop("superset_cli"))
     known = {f.name for f in fields(Config)}
     unknown = sorted(set(data) - known)
     if unknown:
