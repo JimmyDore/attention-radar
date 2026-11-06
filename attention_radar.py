@@ -48,6 +48,7 @@ class Config:
     orchestrators_dir: str = ""
     snooze_file: str = os.path.join(STATE_DIR, "snoozes.json")
     opened_file: str = os.path.join(STATE_DIR, "opened.json")
+    focus_file: str = os.path.join(STATE_DIR, "focus.json")
     demo: bool = False
 
     @property
@@ -91,6 +92,10 @@ TEXTS = {
         "check": "TO CHECK  ·  no activity for {minutes} min",
         "snoozed": "Snoozed ({count})",
         "legend": "Legend",
+        "focus": "Focus on a project",
+        "focus_on": "Focus: {project} until {time}",
+        "unfocus": "Stop focusing",
+        "others": "Other projects  ·  {count}",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
@@ -105,6 +110,10 @@ TEXTS = {
         "check": "À VÉRIFIER  ·  plus d'activité depuis {minutes} min",
         "snoozed": "Snoozées ({count})",
         "legend": "Légende",
+        "focus": "Focus sur un projet",
+        "focus_on": "Focus : {project} jusqu'à {time}",
+        "unfocus": "Arrêter le focus",
+        "others": "Autres projets  ·  {count}",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
@@ -278,6 +287,16 @@ def load_snoozes(path=None):
 
 def load_opened(path=None):
     return _load_json(path or CONFIG.opened_file)
+
+
+def load_focus(now, path=None):
+    """The project to focus on, while its end is still ahead."""
+    focus = _load_json(path or CONFIG.focus_file)
+    return focus if focus.get("project") and focus.get("until", 0) > now else None
+
+
+def save_focus(project, until, path=None):
+    _save_json(path or CONFIG.focus_file, {"project": project, "until": until} if project else {})
 
 
 def save_opened(terminal_id, activity, now, path=None):
@@ -530,51 +549,78 @@ def urgency(row, now):
     return 1 if age < 3600 else (2 if age < 86400 else 3)
 
 
-def _row_lines(row, plugin, now, mark):
+def _row_lines(row, plugin, now, mark, depth=0):
     """One short line; hovering opens Open and Snooze, so Open sits right under the pointer."""
+    p = "--" * depth
     # refresh=true redraws the menu right after the click, with this row moved to the end.
     opener = _params(plugin, "open", row.workspace_id, row.pane_id, row.terminal_id, row.activity)
     # SwiftBar 2.1 drops the submenu routing of an action-less row when it patches the menu in
     # place, which greys the row out. An action on the row itself keeps it enabled.
-    lines = [f"{mark}  {_safe(row.label)} | {opener} refresh=true length=55 {FLAGS}"]
-    lines.append(f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}")
+    lines = [f"{p}{mark}  {_safe(row.label)} | {opener} refresh=true length=55 {FLAGS}"]
+    lines.append(f"{p}--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}")
     if row.verdict.bucket == NEEDS:
-        lines.append(f"--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
+        lines.append(f"{p}--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
         for label, until in snooze_choices(now):
             action = _params(plugin, "snooze", row.terminal_id, row.activity, int(until))
-            lines.append(f"----{label} | {action} refresh=true {FLAGS}")
+            lines.append(f"{p}----{label} | {action} refresh=true {FLAGS}")
     return lines
 
 
-def render(radar, plugin, now):
-    needs = [r for r in radar.rows if r.verdict.bucket == NEEDS]
-    checks = [r for r in radar.rows if r.verdict.bucket == CHECK]
-    if radar.warning:
-        lines = ["! | sfimage=exclamationmark.triangle", "---", f"{_safe(radar.warning)} | {FLAGS}"]
-    elif needs:
-        lines = [f"{len(needs)} | sfimage=tray.full", "---"]
-    else:
-        lines = ["0 | sfimage=checkmark.circle", "---", f"{text('inbox_zero')} | {FLAGS}"]
-    groups = {}
+def _groups(rows, plugin, now, depth=0):
+    """Rows grouped by project, the project holding the most urgent row first."""
+    p = "--" * depth
+    needs = [r for r in rows if r.verdict.bucket == NEEDS]
+    checks = [r for r in rows if r.verdict.bucket == CHECK]
+    groups, lines = {}, []
     # A row opened since its last message goes last: it is being answered, not waiting.
     for row in sorted(needs, key=lambda r: (r.opened, urgency(r, now), r.since or 0)):
         groups.setdefault(row.project, []).append(row)
-    for index, (project, rows) in enumerate(groups.items()):
+    for index, (project, members) in enumerate(groups.items()):
         if index:
-            lines.append("---")
-        lines.append(f"{_safe(project.upper())}  ·  {len(rows)} | size=11 color={GREY} {FLAGS}")
-        for row in rows:
-            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)])
+            lines.append(f"{p}---")
+        lines.append(f"{p}{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY} {FLAGS}")
+        for row in members:
+            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
     if checks:
         heading = text("check", minutes=CONFIG.stale_after_minutes)
-        lines += ["---", f"{heading} | size=11 color={GREY} {FLAGS}"]
+        lines += [f"{p}---", f"{p}{heading} | size=11 color={GREY} {FLAGS}"]
         for row in checks:
-            lines += _row_lines(row, plugin, now, "⏳")
+            lines += _row_lines(row, plugin, now, "⏳", depth)
+    return lines
+
+
+def render(radar, plugin, now, focus=None):
+    project = focus["project"] if focus else None
+    shown = [r for r in radar.rows if project is None or r.project == project]
+    others = [r for r in radar.rows if project is not None and r.project != project]
+    needs = [r for r in shown if r.verdict.bucket == NEEDS]
+    if radar.warning:
+        lines = ["! | sfimage=exclamationmark.triangle", "---", f"{_safe(radar.warning)} | {FLAGS}"]
+    else:
+        lines = [f"{len(needs)} | sfimage={'tray.full' if needs else 'checkmark.circle'}", "---"]
+    if focus:
+        until = dt.datetime.fromtimestamp(focus["until"]).strftime("%H:%M")
+        lines.append(f"{text('focus_on', project=_safe(project.upper()), time=until)} | sfimage=scope {FLAGS}")
+        lines.append(f"--{text('unfocus')} | {_params(plugin, 'unfocus')} refresh=true {FLAGS}")
+        lines.append("---")
+    if not radar.warning and not needs:
+        lines.append(f"{text('inbox_zero')} | {FLAGS}")
+    lines += _groups(shown, plugin, now)
+    if others:
+        count = sum(r.verdict.bucket == NEEDS for r in others)
+        lines += ["---", f"{text('others', count=count)} | {FLAGS}"] + _groups(others, plugin, now, depth=1)
     if radar.snoozed:
         lines += ["---", f"{text('snoozed', count=len(radar.snoozed))} | sfimage=moon.zzz {FLAGS}"]
         for row in radar.snoozed:
             opener = _params(plugin, "open", row.workspace_id, row.pane_id)
             lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
+    projects = list(dict.fromkeys(r.project for r in radar.rows if r.project))
+    if projects and not focus:
+        lines += ["---", f"{text('focus')} | sfimage=scope {FLAGS}"]
+        for name in projects:
+            lines.append(f"--{_safe(name)} | {FLAGS}")
+            for label, until in snooze_choices(now):
+                lines.append(f"----{label} | {_params(plugin, 'focus', name, int(until))} refresh=true {FLAGS}")
     lines += ["---", f"{text('legend')} | size=11 color={GREY} {FLAGS}"]
     lines += [f"--{mark}  {label} | {FLAGS}" for mark, label in zip(MARKS, text("urgency"))]
     return "\n".join(lines)
@@ -652,11 +698,17 @@ def main(argv, plugin):
         if len(argv) > 2 and argv[2]:
             subprocess.run([CONFIG.cli, "panes", "focus", "--workspace", argv[1], "--pane", argv[2]], timeout=20)
         return 0
-    if argv[:1] in (["open"], ["snooze"]) and CONFIG.demo:
+    if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"]) and CONFIG.demo:
         return 0
     if argv[:1] == ["snooze"]:
         until = float(argv[3]) if len(argv) > 3 and argv[3] else None
         save_snooze(argv[1], argv[2] if len(argv) > 2 else "", now, until=until)
+        return 0
+    if argv[:1] == ["focus"] and len(argv) > 2:
+        save_focus(argv[1], float(argv[2]))
+        return 0
+    if argv[:1] == ["unfocus"]:
+        save_focus(None, 0)
         return 0
     try:
         radar = build(load_snapshot(), load_sessions(), load_failed_terminals(), load_snoozes(), now,
@@ -664,7 +716,7 @@ def main(argv, plugin):
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
-    print(render(radar, plugin, now))
+    print(render(radar, plugin, now, load_focus(now)))
     return 0
 
 

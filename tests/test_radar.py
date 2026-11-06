@@ -143,6 +143,15 @@ class Snooze(Base):
             ar.save_snooze("t", "a", NOW, path, until=NOW + 3600)
             self.assertEqual(ar.load_snoozes(path)["t"]["until"], NOW + 3600)
 
+    def test_focus_ends_on_its_own(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub", "f.json")
+            ar.save_focus("side", NOW + 60, path)
+            self.assertEqual(ar.load_focus(NOW, path), {"project": "side", "until": NOW + 60})
+            self.assertIsNone(ar.load_focus(NOW + 61, path))
+            ar.save_focus(None, 0, path)
+            self.assertIsNone(ar.load_focus(NOW, path))
+
     def test_opened_is_remembered_for_a_day(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "sub", "o.json")
@@ -333,9 +342,28 @@ class Render(Base):
         out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines()
         submenu = [line for line in out if line.startswith("--") and not line.startswith("---")]
         self.assertIn('param1="open" param2="w1" param3="p1" param4="t1" param5="r"', submenu[0])
-        snoozes = [line for line in out if line.startswith("----") and not line.startswith("-----")]
+        snoozes = [line for line in out if 'param1="snooze"' in line]
         self.assertEqual(len(snoozes), len(ar.snooze_choices(NOW)))
         self.assertIn('param1="snooze" param2="t1" param3="r"', snoozes[0])
+
+    def test_focus_keeps_one_project_and_folds_the_others(self):
+        rows = [self.row(project="acme", label="a"), self.row(project="side", label="b"),
+                self.row(project="side", label="c")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW, {"project": "side", "until": NOW + 3600})
+        top = self.top_level(out)
+        self.assertEqual(top[0], "2")
+        self.assertIn("SIDE  ·  2", top)
+        self.assertNotIn("🟡  a", top)
+        self.assertIn("Other projects  ·  1", top)
+        self.assertIn("--🟡  a", [line.split(" | ")[0] for line in out.splitlines()])
+        self.assertIn('param1="unfocus"', out)
+        self.assertNotIn('param1="focus"', out)
+
+    def test_focus_menu_offers_each_project_and_duration(self):
+        out = ar.render(ar.Radar(rows=[self.row(project="acme"), self.row(project="side")]), "/p", NOW)
+        focus = [line for line in out.splitlines() if 'param1="focus"' in line]
+        self.assertEqual(len(focus), 2 * len(ar.snooze_choices(NOW)))
+        self.assertIn('param2="side"', focus[-1])
 
     def test_text_cannot_break_the_swiftbar_line(self):
         for current in ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines():

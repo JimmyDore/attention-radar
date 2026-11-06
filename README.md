@@ -36,6 +36,7 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 - Click a row to open its workspace in Paradev, on the right pane.
 - A row you opened moves to the end of its group until the session writes again, so you don't open it twice while the radar catches up.
 - Hover, then **Snooze**: 1 h, 2 h, until noon or 18:00, or tomorrow morning. New activity in the session brings it back sooner.
+- **Focus on a project**, then a duration: only that project shows and counts in the menu bar; the others fold into one "Other projects" submenu until the focus ends or you stop it.
 - `!` in the menu bar means the radar is broken. It never shows zero in that case.
 
 The menu never deletes a workspace and never types into a session.
