@@ -330,6 +330,12 @@ class Text(Base):
         self.assertEqual(ar.excerpt("start\n\n**Ship it?**"), "Ship it?")
         self.assertTrue(ar.excerpt("x" * 200).startswith("…"))
 
+    def test_preview_drops_the_closing_sentence(self):
+        drop = ar.without_closing_sentence
+        self.assertEqual(drop("Your note is still open. Pick it up if you remember."), "Your note is still open.")
+        self.assertEqual(drop("Tests pass. Should I open the PR?"), "Tests pass. Should I open the PR?")
+        self.assertEqual(drop("Done: the PR is merged."), "Done: the PR is merged.")
+
     def test_duration(self):
         self.assertEqual([ar.duration(s) for s in (59, 3600, 7200, 200000)], ["0 min", "1 h", "2 h", "2 d"])
 

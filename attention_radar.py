@@ -248,6 +248,15 @@ def excerpt(content, limit=EXCERPT_CHARS):
     return "…" + tail[-limit:].lstrip() if len(tail) > limit else tail
 
 
+def without_closing_sentence(content):
+    """Drop the sign-off sentence: it pushes "Open" further down for no context.
+    A closing question stays, since that is the ask."""
+    if content.endswith("?"):
+        return content
+    ends = list(re.finditer(r"(?<=[.!…])\s+(?=\S)", content))
+    return content[:ends[-1].start()] if ends else content
+
+
 def clean_title(title):
     return re.sub(r"^[^\w«\"']+", "", html.unescape(title or "")).strip()
 
@@ -489,7 +498,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), transcript.last_ts_raw, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
-            row.detail = excerpt(shown, 420)
+            row.detail = without_closing_sentence(excerpt(shown, 420))
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
             else:
