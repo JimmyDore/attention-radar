@@ -143,6 +143,13 @@ class Snooze(Base):
             ar.save_snooze("t", "a", NOW, path, until=NOW + 3600)
             self.assertEqual(ar.load_snoozes(path)["t"]["until"], NOW + 3600)
 
+    def test_opened_is_remembered_for_a_day(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub", "o.json")
+            ar.save_opened("old", "a", NOW - 200000, path)
+            ar.save_opened("new", "b", NOW, path)
+            self.assertEqual(ar.load_opened(path), {"new": {"activity": "b", "at": NOW}})
+
     def test_save_keeps_live_entries_and_drops_expired(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "sub", "s.json")
@@ -160,10 +167,15 @@ def term(id_="t1", state="idle", title="◑ Un titre"):
 
 
 class Build(Base):
-    def build(self, snap, sessions, snoozes=None, transcript=None):
+    def build(self, snap, sessions, snoozes=None, transcript=None, opened=None):
         return ar.build(snap, sessions, set(), snoozes or {}, NOW,
                         read=lambda s: transcript or t(last_ts=NOW - 60, last_ts_raw="r", last_text="Ship it?"),
-                        subagents=lambda s: None)
+                        subagents=lambda s: None, opened=opened)
+
+    def test_opened_until_the_session_writes_again(self):
+        sessions = {"t1": {"status": "idle", "sessionId": "s"}}
+        self.assertTrue(self.build(snapshot(term()), sessions, opened={"t1": {"activity": "r"}}).rows[0].opened)
+        self.assertFalse(self.build(snapshot(term()), sessions, opened={"t1": {"activity": "old"}}).rows[0].opened)
 
     def test_row_fields(self):
         row = self.build(snapshot(term()), {"t1": {"status": "idle", "sessionId": "s"}}).rows[0]
@@ -307,6 +319,12 @@ class Render(Base):
         row_line = next(line for line in first if line.startswith("🟡"))
         self.assertIn('param1="open"', row_line)
 
+    def test_opened_row_goes_last_in_its_group(self):
+        rows = [self.row(since=NOW - 600, label="a"), self.row(since=NOW - 7200, label="b")]
+        rows[0].opened = True
+        top = self.top_level(ar.render(ar.Radar(rows=rows), "/p", NOW))
+        self.assertEqual(top[2:4], ["🟡  b", "🟠  a"])
+
     def test_urgency_by_age(self):
         marks = [ar.MARKS[ar.urgency(self.row(since=NOW - age), NOW)] for age in (60, 7200, 90000)]
         self.assertEqual(marks, ["🟠", "🟡", "⚪"])
@@ -314,7 +332,7 @@ class Render(Base):
     def test_hover_holds_open_first_and_every_snooze_choice(self):
         out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines()
         submenu = [line for line in out if line.startswith("--") and not line.startswith("---")]
-        self.assertIn('param1="open" param2="w1" param3="p1"', submenu[0])
+        self.assertIn('param1="open" param2="w1" param3="p1" param4="t1" param5="r"', submenu[0])
         snoozes = [line for line in out if line.startswith("----") and not line.startswith("-----")]
         self.assertEqual(len(snoozes), len(ar.snooze_choices(NOW)))
         self.assertIn('param1="snooze" param2="t1" param3="r"', snoozes[0])

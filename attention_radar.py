@@ -47,6 +47,7 @@ class Config:
     ignore_projects: List[str] = field(default_factory=list)
     orchestrators_dir: str = ""
     snooze_file: str = os.path.join(STATE_DIR, "snoozes.json")
+    opened_file: str = os.path.join(STATE_DIR, "opened.json")
     demo: bool = False
 
     @property
@@ -155,6 +156,7 @@ class Row:
     activity: str = ""
     session_id: Optional[str] = None
     pane_id: str = ""
+    opened: bool = False
 
 
 @dataclass
@@ -254,12 +256,37 @@ def is_snoozed(snooze, activity, now):
     return bool(snooze) and now < snooze.get("until", 0) and snooze.get("activity") == activity
 
 
-def load_snoozes(path=None):
+def _load_json(path):
     try:
-        with open(path or CONFIG.snooze_file) as handle:
+        with open(path) as handle:
             return json.load(handle)
     except (OSError, ValueError):
         return {}
+
+
+def _save_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    temp = path + ".tmp"
+    with open(temp, "w") as handle:
+        json.dump(data, handle)
+    os.replace(temp, path)
+
+
+def load_snoozes(path=None):
+    return _load_json(path or CONFIG.snooze_file)
+
+
+def load_opened(path=None):
+    return _load_json(path or CONFIG.opened_file)
+
+
+def save_opened(terminal_id, activity, now, path=None):
+    """Remember that this message was opened, so the row drops to the end of its group
+    until the session writes again, instead of waiting for the next refresh to clear it."""
+    path = path or CONFIG.opened_file
+    opened = {k: v for k, v in load_opened(path).items() if v.get("at", 0) > now - 86400}
+    opened[terminal_id] = {"activity": activity, "at": now}
+    _save_json(path, opened)
 
 
 def snooze_choices(now):
@@ -277,11 +304,7 @@ def save_snooze(terminal_id, activity, now, path=None, until=None):
     path = path or CONFIG.snooze_file
     snoozes = {k: v for k, v in load_snoozes(path).items() if v.get("until", 0) > now}
     snoozes[terminal_id] = {"until": until or next_morning(now), "activity": activity}
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    temp = path + ".tmp"
-    with open(temp, "w") as handle:
-        json.dump(snoozes, handle)
-    os.replace(temp, path)
+    _save_json(path, snoozes)
 
 
 def load_sessions():
@@ -423,9 +446,10 @@ def pane_ids(workspace):
 
 
 def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subagents=newest_subagent_write,
-          orchestrators=None):
+          orchestrators=None, opened=None):
     radar = Radar()
     orchestrators = orchestrators or {}
+    opened = opened or {}
     running = running_workspaces(snapshot, sessions) if orchestrators else set()
     ignored = set(CONFIG.ignore_projects)
     agents = matched = 0
@@ -472,6 +496,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), transcript.last_ts_raw, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
+            row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
             else:
@@ -507,11 +532,12 @@ def urgency(row, now):
 
 def _row_lines(row, plugin, now, mark):
     """One short line; hovering opens Open and Snooze, so Open sits right under the pointer."""
-    opener = _params(plugin, "open", row.workspace_id, row.pane_id)
+    # refresh=true redraws the menu right after the click, with this row moved to the end.
+    opener = _params(plugin, "open", row.workspace_id, row.pane_id, row.terminal_id, row.activity)
     # SwiftBar 2.1 drops the submenu routing of an action-less row when it patches the menu in
     # place, which greys the row out. An action on the row itself keeps it enabled.
-    lines = [f"{mark}  {_safe(row.label)} | {opener} refresh=false length=55 {FLAGS}"]
-    lines.append(f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=false {FLAGS}")
+    lines = [f"{mark}  {_safe(row.label)} | {opener} refresh=true length=55 {FLAGS}"]
+    lines.append(f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}")
     if row.verdict.bucket == NEEDS:
         lines.append(f"--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
         for label, until in snooze_choices(now):
@@ -530,7 +556,8 @@ def render(radar, plugin, now):
     else:
         lines = ["0 | sfimage=checkmark.circle", "---", f"{text('inbox_zero')} | {FLAGS}"]
     groups = {}
-    for row in sorted(needs, key=lambda r: (urgency(r, now), r.since or 0)):
+    # A row opened since its last message goes last: it is being answered, not waiting.
+    for row in sorted(needs, key=lambda r: (r.opened, urgency(r, now), r.since or 0)):
         groups.setdefault(row.project, []).append(row)
     for index, (project, rows) in enumerate(groups.items()):
         if index:
@@ -619,6 +646,8 @@ def main(argv, plugin):
         print(render(demo_radar(now), plugin, now))
         return 0
     if argv[:1] == ["open"] and not argv[1].startswith("demo-"):
+        if len(argv) > 3 and argv[3]:
+            save_opened(argv[3], argv[4] if len(argv) > 4 else "", now)
         subprocess.run([CONFIG.cli, "workspaces", "open", "--local", argv[1]], timeout=20)
         if len(argv) > 2 and argv[2]:
             subprocess.run([CONFIG.cli, "panes", "focus", "--workspace", argv[1], "--pane", argv[2]], timeout=20)
@@ -631,7 +660,7 @@ def main(argv, plugin):
         return 0
     try:
         radar = build(load_snapshot(), load_sessions(), load_failed_terminals(), load_snoozes(), now,
-                      orchestrators=load_orchestrators())
+                      orchestrators=load_orchestrators(), opened=load_opened())
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
