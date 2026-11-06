@@ -23,6 +23,7 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | Recurring cron not deleted | transcript | Hidden |
 | Orchestrator whose worker is still running, with no unread report (opt-in, see below) | orchestrator records | Hidden |
 | Anything else | | Counted, oldest first |
+| Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
 
 Rows are grouped by project. The dot shows how long a session has been waiting: 🟠 under 1 h, 🟡 1 to 24 h, ⚪ over 24 h (probably finished: delete the workspace).
 
@@ -36,10 +37,11 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 - Click a row to open its workspace in Paradev, on the right pane.
 - A row you opened moves to the end of its group until the session writes again, so you don't open it twice while the radar catches up.
 - Hover, then **Snooze**: 1 h, 2 h, until noon or 18:00, or tomorrow morning. New activity in the session brings it back sooner.
+- After a shutdown or a crash, the sessions that were open show under **Interrupted**. Click one to resume it in its workspace on the same conversation (`paradev agents create --resume-session`), or **Resume all** to bring them back one every two seconds. A row leaves once a live terminal holds its session again.
 - **Focus on a project**, then a duration: only that project shows and counts in the menu bar; the others fold into one "Other projects" submenu until the focus ends or you stop it.
 - `!` in the menu bar means the radar is broken. It never shows zero in that case.
 
-The menu never deletes a workspace and never types into a session.
+The menu never deletes a workspace and never types into a session. Resume is the one thing it starts: a Claude on a conversation that already existed, and only when you click it.
 
 ## Install
 
@@ -89,7 +91,7 @@ Everything has a default. To change something, create `~/.config/attention-radar
 | `ignore_projects` | `[]` | Paradev project names the radar skips |
 | `paradev_cli` | found automatically | Path to the `paradev` CLI |
 | `claude_dir` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | Where Claude Code keeps its sessions and transcripts |
-| `host_dbs` | `~/.paradev/host/*/host.db`, `~/.superset/host/*/host.db` | Paradev host databases, read for failed turns |
+| `host_dbs` | `~/.paradev/host/*/host.db`, `~/.superset/host/*/host.db` | Paradev host databases, read for failed turns and interrupted sessions |
 | `orchestrators_dir` | off | See below |
 | `demo` | `false` | Show made-up sessions instead of yours, for screenshots |
 
@@ -113,11 +115,11 @@ Your orchestration tooling writes these files. The radar only reads them.
 
 - `~/.claude/sessions` and `host.db` are internal formats, so an update to Claude Code or Paradev can break the radar. If no session matches at all, the menu bar shows `!` instead of zero.
 - Sessions are matched to terminals through the terminal id that Paradev puts in its environment (`SUPERSET_TERMINAL_ID` today), so only Claude Code started in a Paradev terminal is counted.
-- A workspace without Claude running isn't counted, so a Claude that exits before finishing drops off the radar.
+- A workspace without Claude running isn't counted, so a Claude you exit before it finishes drops off the radar. Sessions killed with their terminal (shutdown, crash) are the exception: they show as Interrupted.
 
 ## Privacy
 
-The radar runs locally and makes no network calls. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files and the end of each transcript. It writes only its snooze file.
+The radar runs locally and makes no network calls. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files and the end of each transcript. It writes only its own state files (snoozes, opened rows, focus), and starts a Claude only when you click Resume.
 
 ## Development
 

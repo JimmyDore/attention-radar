@@ -246,6 +246,82 @@ class Build(Base):
         self.assertEqual([r.terminal_id for r in radar.rows], ["dlg", "old", "new"])
 
 
+def binding(terminal="dead", workspace="w1", session="s1", at=5, ended=None, reason=None):
+    return {"terminal_id": terminal, "workspace_id": workspace, "agent_id": "claude", "agent_session_id": session,
+            "started_at": at, "last_event_at": at, "ended_at": ended, "end_reason": reason}
+
+
+class Interrupted(Base):
+    """A shutdown kills the terminals but leaves their bindings open in host.db, until Paradev sweeps them."""
+
+    def rows(self, snap, bindings, dismissed=()):
+        return ar.interrupted_rows(snap, bindings, dismissed)
+
+    def test_open_binding_without_terminal_is_interrupted(self):
+        rows = self.rows(snapshot(), [binding()])
+        self.assertEqual([(r.workspace_id, r.session_id, r.agent, r.label) for r in rows],
+                         [("w1", "s1", "claude", "feature-1")])
+
+    def test_swept_as_terminal_exited_is_still_interrupted(self):
+        self.assertEqual(len(self.rows(snapshot(), [binding(ended=9, reason="terminal-exited")])), 1)
+
+    def test_closed_pane_or_resumed_binding_is_not(self):
+        for reason in ("disposed", "resumed", "detached"):
+            self.assertEqual(self.rows(snapshot(), [binding(ended=9, reason=reason)]), [], reason)
+
+    def test_only_the_latest_binding_of_a_session_counts(self):
+        older_killed_then_closed = [binding("a", at=1, ended=2, reason="terminal-exited"),
+                                    binding("b", at=3, ended=4, reason="disposed")]
+        self.assertEqual(self.rows(snapshot(), older_killed_then_closed), [])
+
+    def test_live_terminal_is_not_interrupted(self):
+        self.assertEqual(self.rows(snapshot(term("dead")), [binding()]), [])
+
+    def test_session_resumed_in_a_new_terminal_is_back(self):
+        resumed = [binding(at=1, ended=9, reason="terminal-exited"), binding("new", at=2)]
+        self.assertEqual(self.rows(snapshot(term("new")), resumed), [])
+        cli_resume_leaves_old_open = [binding(at=2), binding("new", at=1)]
+        self.assertEqual(self.rows(snapshot(term("new")), cli_resume_leaves_old_open), [])
+
+    def test_archived_ignored_or_dismissed_is_skipped(self):
+        self.assertEqual(self.rows(snapshot(), [binding(workspace="gone")]), [])
+        self.assertEqual(self.rows(snapshot(), [binding()], {"s1": NOW}), [])
+        ar.configure(ar.Config(ignore_projects=["acme"]))
+        self.assertEqual(self.rows(snapshot(), [binding()]), [])
+
+    def test_one_row_per_session_newest_first(self):
+        rows = self.rows(snapshot(), [binding("a", at=1), binding("b", at=5), binding("c", session="s2", at=9)])
+        self.assertEqual([(r.session_id, r.terminal_id) for r in rows], [("s2", "c"), ("s1", "b")])
+
+    def test_dismissed_is_remembered_a_bit_longer_than_it_can_show(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub", "d.json")
+            ar.save_dismissed("old", NOW - 9 * 86400, path)
+            ar.save_dismissed("new", NOW, path)
+            self.assertEqual(ar.load_dismissed(path), {"new": NOW})
+
+    def test_counted_and_offered_a_resume(self):
+        radar = ar.Radar(interrupted=self.rows(snapshot(), [binding()]))
+        out = ar.render(radar, "/p", NOW)
+        self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full")
+        self.assertIn('param1="resume" param2="w1" param3="s1" param4="claude"', out)
+        self.assertIn('param1="resume-all"', out)
+        self.assertIn('param1="dismiss" param2="s1"', out)
+        self.assertNotIn("Inbox zero", out)
+
+    def test_focus_folds_other_projects_interrupted_rows(self):
+        radar = ar.Radar(interrupted=self.rows(snapshot(project="side"), [binding()]))
+        out = ar.render(radar, "/p", NOW, {"project": "acme", "until": NOW + 60})
+        self.assertEqual(out.splitlines()[0], "0 | sfimage=checkmark.circle")
+        self.assertIn("Other projects  ·  1", out)
+        self.assertIn('param1="resume-all" param2="side"', out)
+
+    def test_build_passes_bindings_through(self):
+        radar = ar.build(snapshot(), {}, set(), {}, NOW, read=lambda s: t(), subagents=lambda s: None,
+                         bindings=[binding()])
+        self.assertEqual(len(radar.interrupted), 1)
+
+
 class Orchestrator(Base):
     """An orchestrator idle while its worker runs is not waiting on you."""
 
