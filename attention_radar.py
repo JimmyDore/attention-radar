@@ -519,6 +519,7 @@ def _params(plugin, *args):
 
 FLAGS = "emojize=false symbolize=false trim=true"
 GREY = "#8E8E93"
+RED = "#FF3B30"
 # Emoji, because SwiftBar draws SF Symbols white in a dropdown whatever their colour.
 MARKS = ("🔴", "🟠", "🟡", "⚪")
 
@@ -552,7 +553,7 @@ def render(radar, plugin, now):
     if radar.warning:
         lines = ["! | sfimage=exclamationmark.triangle", "---", f"{_safe(radar.warning)} | {FLAGS}"]
     elif needs:
-        lines = [f"{len(needs)} | sfimage=tray.full", "---"]
+        lines = [f"{len(needs)} | sfimage=tray.full color={RED}", "---"]
     else:
         lines = ["0 | sfimage=checkmark.circle", "---", f"{text('inbox_zero')} | {FLAGS}"]
     groups = {}
