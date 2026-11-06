@@ -272,8 +272,7 @@ class Orchestrator(Base):
 
 class Render(Base):
     def row(self, bucket=ar.NEEDS, project="acme", since=NOW - 7200, kind="", rank=1, label="feature-1"):
-        return ar.Row("w1", "t1", label, project, ar.Verdict(bucket, rank, kind), since, "end", "r",
-                      detail="end | of the text", pane_id="p1")
+        return ar.Row("w1", "t1", label, project, ar.Verdict(bucket, rank, kind), since, "end", "r", pane_id="p1")
 
     def top_level(self, out):
         return [line.split(" | ")[0] for line in out.splitlines() if not line.startswith("--")]
@@ -312,10 +311,10 @@ class Render(Base):
         marks = [ar.MARKS[ar.urgency(self.row(since=NOW - age), NOW)] for age in (60, 7200, 90000)]
         self.assertEqual(marks, ["🟠", "🟡", "⚪"])
 
-    def test_hover_holds_text_open_and_every_snooze_choice(self):
+    def test_hover_holds_open_first_and_every_snooze_choice(self):
         out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines()
-        self.assertIn("--end   of the text | size=13 emojize=false symbolize=false trim=true", out)
-        self.assertTrue(any('param1="open" param2="w1" param3="p1"' in line for line in out))
+        submenu = [line for line in out if line.startswith("--") and not line.startswith("---")]
+        self.assertIn('param1="open" param2="w1" param3="p1"', submenu[0])
         snoozes = [line for line in out if line.startswith("----") and not line.startswith("-----")]
         self.assertEqual(len(snoozes), len(ar.snooze_choices(NOW)))
         self.assertIn('param1="snooze" param2="t1" param3="r"', snoozes[0])
@@ -329,15 +328,6 @@ class Text(Base):
     def test_excerpt_keeps_end_of_last_paragraph(self):
         self.assertEqual(ar.excerpt("start\n\n**Ship it?**"), "Ship it?")
         self.assertTrue(ar.excerpt("x" * 200).startswith("…"))
-
-    def test_preview_drops_the_closing_sentence(self):
-        drop = ar.without_closing_sentence
-        self.assertEqual(drop("Your note is still open. Pick it up if you remember."), "Your note is still open.")
-        self.assertEqual(drop("Tests pass. Should I open the PR?"), "Tests pass. Should I open the PR?")
-        self.assertEqual(drop("Done: the PR is merged."), "Done: the PR is merged.")
-
-    def test_duration(self):
-        self.assertEqual([ar.duration(s) for s in (59, 3600, 7200, 200000)], ["0 min", "1 h", "2 h", "2 d"])
 
 
 class Settings(Base):
@@ -382,7 +372,6 @@ class Settings(Base):
     def test_french(self):
         ar.configure(ar.Config(language="fr"))
         self.assertIn("Inbox zéro", ar.render(ar.Radar(), "/p", NOW))
-        self.assertEqual(ar.duration(200000), "2 j")
 
     def test_stale_threshold_and_snooze_hours_are_configurable(self):
         import datetime as dt

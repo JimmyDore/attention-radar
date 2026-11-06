@@ -2,7 +2,7 @@
 
 A macOS menu bar inbox of the Claude Code sessions in [Paradev](https://superset.sh) (formerly Superset) that are waiting for you.
 
-<img src="docs/screenshot.png" alt="The attention-radar menu: sessions grouped by project, with the hovered one showing its last message" width="720">
+<img src="docs/screenshot.png" alt="The attention-radar menu: sessions grouped by project, with the hovered one offering Open and Snooze" width="720">
 
 ## Why
 
@@ -32,7 +32,7 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 
 ## Using it
 
-- Hover a row to read the end of the session's last message.
+- Hover a row to open its workspace or snooze it.
 - Click a row to open its workspace in Paradev, on the right pane.
 - Hover, then **Snooze**: 1 h, 2 h, until noon or 18:00, or tomorrow morning. New activity in the session brings it back sooner.
 - `!` in the menu bar means the radar is broken. It never shows zero in that case.

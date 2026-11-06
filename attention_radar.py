@@ -82,7 +82,6 @@ def load_config(path=None):
 
 TEXTS = {
     "en": {
-        "waiting": "{project}  ·  waiting for {ago}",
         "open": "Open workspace",
         "snooze": "Snooze",
         "until": "Until {hour}:00",
@@ -91,15 +90,12 @@ TEXTS = {
         "check": "TO CHECK  ·  no activity for {minutes} min",
         "snoozed": "Snoozed ({count})",
         "legend": "Legend",
-        "no_text": "(no text)",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
-        "units": ("min", "h", "d"),
         "urgency": ("blocked: dialog or failure", "under 1 h", "1 to 24 h", "over 24 h: finished?"),
     },
     "fr": {
-        "waiting": "{project}  ·  attend depuis {ago}",
         "open": "Ouvrir le workspace",
         "snooze": "Snoozer",
         "until": "Jusqu'à {hour} h",
@@ -108,11 +104,9 @@ TEXTS = {
         "check": "À VÉRIFIER  ·  plus d'activité depuis {minutes} min",
         "snoozed": "Snoozées ({count})",
         "legend": "Légende",
-        "no_text": "(pas de texte)",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
-        "units": ("min", "h", "j"),
         "urgency": ("bloquée : dialogue ou échec", "moins d'1 h", "1 à 24 h", "plus de 24 h : finie ?"),
     },
 }
@@ -160,7 +154,6 @@ class Row:
     excerpt: str
     activity: str = ""
     session_id: Optional[str] = None
-    detail: str = ""
     pane_id: str = ""
 
 
@@ -248,27 +241,8 @@ def excerpt(content, limit=EXCERPT_CHARS):
     return "…" + tail[-limit:].lstrip() if len(tail) > limit else tail
 
 
-def without_closing_sentence(content):
-    """Drop the sign-off sentence: it pushes "Open" further down for no context.
-    A closing question stays, since that is the ask."""
-    if content.endswith("?"):
-        return content
-    ends = list(re.finditer(r"(?<=[.!…])\s+(?=\S)", content))
-    return content[:ends[-1].start()] if ends else content
-
-
 def clean_title(title):
     return re.sub(r"^[^\w«\"']+", "", html.unescape(title or "")).strip()
-
-
-def duration(seconds):
-    minute, hour, day = text("units")
-    minutes = int(max(seconds, 0) // 60)
-    if minutes < 60:
-        return f"{minutes} {minute}"
-    if minutes < 48 * 60:
-        return f"{minutes // 60} {hour}"
-    return f"{minutes // 1440} {day}"
 
 
 def next_morning(now):
@@ -498,7 +472,6 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), transcript.last_ts_raw, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
-            row.detail = without_closing_sentence(excerpt(shown, 420))
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
             else:
@@ -532,31 +505,12 @@ def urgency(row, now):
     return 1 if age < 3600 else (2 if age < 86400 else 3)
 
 
-def wrap(content, width=60):
-    lines, current = [], ""
-    for word in content.split():
-        if current and len(current) + len(word) + 1 > width:
-            lines.append(current)
-            current = word
-        else:
-            current = f"{current} {word}".strip()
-    return lines + ([current] if current else [])
-
-
-def _ago(row, now):
-    return duration(now - row.since) if row.since else "?"
-
-
 def _row_lines(row, plugin, now, mark):
-    """One short line; hovering opens the full text, Open, and Snooze."""
+    """One short line; hovering opens Open and Snooze, so Open sits right under the pointer."""
     opener = _params(plugin, "open", row.workspace_id, row.pane_id)
     # SwiftBar 2.1 drops the submenu routing of an action-less row when it patches the menu in
     # place, which greys the row out. An action on the row itself keeps it enabled.
     lines = [f"{mark}  {_safe(row.label)} | {opener} refresh=false length=55 {FLAGS}"]
-    header = text("waiting", project=_safe(row.project), ago=_ago(row, now))
-    lines.append(f"--{header} | size=11 color={GREY} {FLAGS}")
-    lines += [f"--{_safe(part)} | size=13 {FLAGS}" for part in wrap(row.detail or row.excerpt or text("no_text"))]
-    lines.append("-----")
     lines.append(f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=false {FLAGS}")
     if row.verdict.bucket == NEEDS:
         lines.append(f"--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
@@ -615,7 +569,7 @@ def demo_radar(now):
     radar = Radar()
     for index, (name, project, bucket, rank, minutes, last) in enumerate(DEMO):
         row = Row(f"demo-{index}", f"demo-{index}", name, project, Verdict(bucket, rank), now - minutes * 60,
-                  excerpt(last), "demo", detail=last)
+                  excerpt(last), "demo")
         radar.rows.append(row)
     radar.snoozed.append(Row("demo-s", "demo-s", "update-dependencies", "web-app", Verdict(NEEDS), now - 600, ""))
     return radar
