@@ -414,6 +414,16 @@ class Render(Base):
         row_line = next(line for line in first if line.startswith("🟡"))
         self.assertIn('param1="open"', row_line)
 
+    def test_every_top_level_submenu_header_stays_enabled(self):
+        # SwiftBar greys out a submenu parent that has no action of its own.
+        rows = [self.row(project="acme", label="a"), self.row(project="side", label="b")]
+        radar = ar.Radar(rows=rows, snoozed=[self.row(label="z")])
+        for focus in (None, {"project": "side", "until": NOW + 3600}):
+            out = ar.render(radar, "/p", NOW, focus, {"acme": NOW + 3600}).splitlines()
+            for line, after in zip(out, out[1:]):
+                if not line.startswith("-") and after.startswith("--") and not after.startswith("---"):
+                    self.assertTrue("refresh=true" in line or "param1=" in line, line)
+
     def test_opened_row_goes_last_in_its_group(self):
         rows = [self.row(since=NOW - 600, label="a"), self.row(since=NOW - 7200, label="b")]
         rows[0].opened = True

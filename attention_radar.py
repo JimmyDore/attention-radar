@@ -762,7 +762,7 @@ def render(radar, plugin, now, focus=None, ignored=None):
         lines += _interrupted_lines(lost_others, plugin, depth=1) + (["-----"] if lost_others and others else [])
         lines += _groups(others, plugin, now, depth=1)
     if radar.snoozed:
-        lines += ["---", f"{text('snoozed', count=len(radar.snoozed))} | sfimage=moon.zzz {FLAGS}"]
+        lines += ["---", f"{text('snoozed', count=len(radar.snoozed))} | sfimage=moon.zzz refresh=true {FLAGS}"]
         for row in radar.snoozed:
             opener = _params(plugin, "open", row.workspace_id, row.pane_id)
             lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
@@ -777,7 +777,7 @@ def render(radar, plugin, now, focus=None, ignored=None):
             lines.append(f"--{_safe(name)} | {FLAGS}")
             for choice, until in snooze_choices(now):
                 lines.append(f"----{choice} | {_params(plugin, action, name, int(until))} refresh=true {FLAGS}")
-    lines += ["---", f"{text('legend')} | size=11 color={GREY} {FLAGS}"]
+    lines += ["---", f"{text('legend')} | size=11 color={GREY} refresh=true {FLAGS}"]
     lines += [f"--{mark}  {label} | {FLAGS}" for mark, label in zip(MARKS, text("urgency"))]
     return "\n".join(lines)
 
