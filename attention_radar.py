@@ -703,7 +703,8 @@ def render(radar, plugin, now, focus=None):
         lines = [f"{len(needs)} | sfimage={'tray.full' if needs else 'checkmark.circle'}", "---"]
     if focus:
         until = dt.datetime.fromtimestamp(focus["until"]).strftime("%H:%M")
-        lines.append(f"{text('focus_on', project=_safe(project.upper()), time=until)} | sfimage=scope {FLAGS}")
+        # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
+        lines.append(f"{text('focus_on', project=_safe(project.upper()), time=until)} | sfimage=scope refresh=true {FLAGS}")
         lines.append(f"--{text('unfocus')} | {_params(plugin, 'unfocus')} refresh=true {FLAGS}")
         lines.append("---")
     if not radar.warning and not needs:
@@ -713,7 +714,7 @@ def render(radar, plugin, now, focus=None):
     lines += _groups(shown, plugin, now)
     if others or lost_others:
         count = sum(r.verdict.bucket == NEEDS for r in others) + len(lost_others)
-        lines += ["---", f"{text('others', count=count)} | {FLAGS}"]
+        lines += ["---", f"{text('others', count=count)} | refresh=true {FLAGS}"]
         lines += _interrupted_lines(lost_others, plugin, depth=1) + (["-----"] if lost_others and others else [])
         lines += _groups(others, plugin, now, depth=1)
     if radar.snoozed:
@@ -723,7 +724,7 @@ def render(radar, plugin, now, focus=None):
             lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
     projects = list(dict.fromkeys(r.project for r in radar.rows + radar.interrupted if r.project))
     if projects and not focus:
-        lines += ["---", f"{text('focus')} | sfimage=scope {FLAGS}"]
+        lines += ["---", f"{text('focus')} | sfimage=scope refresh=true {FLAGS}"]
         for name in projects:
             lines.append(f"--{_safe(name)} | {FLAGS}")
             for label, until in snooze_choices(now):
