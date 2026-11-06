@@ -291,7 +291,7 @@ class Render(Base):
 
     def test_count_excludes_check_rows(self):
         out = ar.render(ar.Radar(rows=[self.row(), self.row(ar.CHECK)]), "/p", NOW)
-        self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full color=#FF3B30")
+        self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full")
         self.assertIn("TO CHECK", out)
 
     def test_zero_says_inbox_zero(self):
@@ -407,7 +407,7 @@ class Settings(Base):
 
     def test_demo_menu_needs_no_paradev(self):
         out = ar.render(ar.demo_radar(NOW), "/p", NOW)
-        self.assertTrue(out.splitlines()[0].endswith("sfimage=tray.full color=#FF3B30"))
+        self.assertTrue(out.splitlines()[0].endswith("sfimage=tray.full"))
 
 
 if __name__ == "__main__":
