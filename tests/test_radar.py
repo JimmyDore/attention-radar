@@ -152,6 +152,16 @@ class Snooze(Base):
             ar.save_focus(None, 0, path)
             self.assertIsNone(ar.load_focus(NOW, path))
 
+    def test_ignore_ends_on_its_own_and_can_be_stopped(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub", "i.json")
+            ar.save_ignored("side", NOW + 60, NOW, path)
+            ar.save_ignored("acme", NOW + 600, NOW, path)
+            self.assertEqual(ar.load_ignored(NOW, path), {"side": NOW + 60, "acme": NOW + 600})
+            self.assertEqual(ar.load_ignored(NOW + 61, path), {"acme": NOW + 600})
+            ar.save_ignored("acme", None, NOW, path)
+            self.assertEqual(ar.load_ignored(NOW, path), {"side": NOW + 60})
+
     def test_opened_is_remembered_for_a_day(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "sub", "o.json")
@@ -440,6 +450,32 @@ class Render(Base):
         focus = [line for line in out.splitlines() if 'param1="focus"' in line]
         self.assertEqual(len(focus), 2 * len(ar.snooze_choices(NOW)))
         self.assertIn('param2="side"', focus[-1])
+
+    def test_ignored_project_leaves_the_count_and_folds_away(self):
+        rows = [self.row(project="acme", label="a"), self.row(project="side", label="b"),
+                self.row(project="side", label="c")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW, ignored={"side": NOW + 3600})
+        top = self.top_level(out)
+        self.assertEqual(top[0], "1")
+        self.assertNotIn("SIDE  ·  2", top)
+        self.assertIn("Ignored projects  ·  2", top)
+        self.assertIn("--SIDE  ·  2", [line.split(" | ")[0] for line in out.splitlines()])
+        self.assertIn('param1="unignore" param2="side"', out)
+        ignore = [line for line in out.splitlines() if 'param1="ignore"' in line]
+        self.assertEqual(len(ignore), len(ar.snooze_choices(NOW)))
+        self.assertIn('param2="acme"', ignore[0])
+
+    def test_ignoring_everything_reads_as_inbox_zero(self):
+        out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW, ignored={"acme": NOW + 3600})
+        self.assertEqual(out.splitlines()[0], "0 | sfimage=checkmark.circle")
+        self.assertIn("Inbox zero", out)
+
+    def test_ignore_wins_over_focus(self):
+        rows = [self.row(project="acme", label="a"), self.row(project="side", label="b")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW, {"project": "side", "until": NOW + 3600},
+                        {"side": NOW + 3600})
+        self.assertEqual(out.splitlines()[0], "0 | sfimage=checkmark.circle")
+        self.assertIn("Other projects  ·  1", out)
 
     def test_text_cannot_break_the_swiftbar_line(self):
         for current in ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines():

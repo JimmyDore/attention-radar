@@ -52,6 +52,7 @@ class Config:
     snooze_file: str = os.path.join(STATE_DIR, "snoozes.json")
     opened_file: str = os.path.join(STATE_DIR, "opened.json")
     focus_file: str = os.path.join(STATE_DIR, "focus.json")
+    ignored_file: str = os.path.join(STATE_DIR, "ignored.json")
     dismissed_file: str = os.path.join(STATE_DIR, "dismissed.json")
     demo: bool = False
 
@@ -100,6 +101,10 @@ TEXTS = {
         "focus_on": "Focus: {project} until {time}",
         "unfocus": "Stop focusing",
         "others": "Other projects  ·  {count}",
+        "ignore": "Ignore a project",
+        "ignored": "Ignored projects  ·  {count}",
+        "ignored_until": "{project} until {time}",
+        "unignore": "Stop ignoring",
         "interrupted": "INTERRUPTED  ·  {count}  ·  terminal gone, conversation kept",
         "resume": "Resume",
         "resume_all": "Resume all {count}",
@@ -122,6 +127,10 @@ TEXTS = {
         "focus_on": "Focus : {project} jusqu'à {time}",
         "unfocus": "Arrêter le focus",
         "others": "Autres projets  ·  {count}",
+        "ignore": "Ignorer un projet",
+        "ignored": "Projets ignorés  ·  {count}",
+        "ignored_until": "{project} jusqu'à {time}",
+        "unignore": "Ne plus ignorer",
         "interrupted": "INTERROMPUES  ·  {count}  ·  terminal fermé, conversation gardée",
         "resume": "Reprendre",
         "resume_all": "Tout reprendre ({count})",
@@ -311,6 +320,21 @@ def load_focus(now, path=None):
 
 def save_focus(project, until, path=None):
     _save_json(path or CONFIG.focus_file, {"project": project, "until": until} if project else {})
+
+
+def load_ignored(now, path=None):
+    """{project: until} for the projects set aside from the menu, while their end is still ahead."""
+    return {k: v for k, v in _load_json(path or CONFIG.ignored_file).items() if v > now}
+
+
+def save_ignored(project, until, now, path=None):
+    """Set a project aside until then, or bring it back when until is None."""
+    path = path or CONFIG.ignored_file
+    ignored = load_ignored(now, path)
+    ignored.pop(project, None)
+    if until:
+        ignored[project] = until
+    _save_json(path, ignored)
 
 
 def load_dismissed(path=None):
@@ -690,12 +714,32 @@ def _interrupted_lines(rows, plugin, depth=0):
     return lines
 
 
-def render(radar, plugin, now, focus=None):
+def _ignored_lines(ignored, rows, lost, plugin, now):
+    """The projects set aside: each one comes back on its own, or from Stop ignoring."""
+    if not ignored:
+        return []
+    count = sum(r.verdict.bucket == NEEDS for r in rows) + len(lost)
+    lines = ["---", f"{text('ignored', count=count)} | sfimage=eye.slash refresh=true {FLAGS}"]
+    for name, until in sorted(ignored.items(), key=lambda item: item[1]):
+        time_ = dt.datetime.fromtimestamp(until).strftime("%H:%M")
+        lines.append(f"--{text('ignored_until', project=_safe(name.upper()), time=time_)} | refresh=true {FLAGS}")
+        lines.append(f"----{text('unignore')} | {_params(plugin, 'unignore', name)} refresh=true {FLAGS}")
+    if rows or lost:
+        lines.append("-----")
+    lines += _interrupted_lines(lost, plugin, depth=1) + (["-----"] if lost and rows else [])
+    return lines + _groups(rows, plugin, now, depth=1)
+
+
+def render(radar, plugin, now, focus=None, ignored=None):
+    ignored = ignored or {}
     project = focus["project"] if focus else None
-    shown = [r for r in radar.rows if project is None or r.project == project]
-    others = [r for r in radar.rows if project is not None and r.project != project]
-    lost = [r for r in radar.interrupted if project is None or r.project == project]
-    lost_others = [r for r in radar.interrupted if project is not None and r.project != project]
+    # An ignored project neither shows nor counts, even if it is the one in focus.
+    rows = [r for r in radar.rows if r.project not in ignored]
+    interrupted = [r for r in radar.interrupted if r.project not in ignored]
+    shown = [r for r in rows if project is None or r.project == project]
+    others = [r for r in rows if project is not None and r.project != project]
+    lost = [r for r in interrupted if project is None or r.project == project]
+    lost_others = [r for r in interrupted if project is not None and r.project != project]
     needs = [r for r in shown if r.verdict.bucket == NEEDS] + lost
     if radar.warning:
         lines = ["! | sfimage=exclamationmark.triangle", "---", f"{_safe(radar.warning)} | {FLAGS}"]
@@ -722,13 +766,17 @@ def render(radar, plugin, now, focus=None):
         for row in radar.snoozed:
             opener = _params(plugin, "open", row.workspace_id, row.pane_id)
             lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
-    projects = list(dict.fromkeys(r.project for r in radar.rows + radar.interrupted if r.project))
-    if projects and not focus:
-        lines += ["---", f"{text('focus')} | sfimage=scope refresh=true {FLAGS}"]
+    lines += _ignored_lines(ignored, [r for r in radar.rows if r.project in ignored],
+                            [r for r in radar.interrupted if r.project in ignored], plugin, now)
+    projects = list(dict.fromkeys(r.project for r in rows + interrupted if r.project))
+    for action, label, icon in (("focus", "focus", "scope"), ("ignore", "ignore", "eye.slash")):
+        if not projects or (action == "focus" and focus):
+            continue
+        lines += ["---", f"{text(label)} | sfimage={icon} refresh=true {FLAGS}"]
         for name in projects:
             lines.append(f"--{_safe(name)} | {FLAGS}")
-            for label, until in snooze_choices(now):
-                lines.append(f"----{label} | {_params(plugin, 'focus', name, int(until))} refresh=true {FLAGS}")
+            for choice, until in snooze_choices(now):
+                lines.append(f"----{choice} | {_params(plugin, action, name, int(until))} refresh=true {FLAGS}")
     lines += ["---", f"{text('legend')} | size=11 color={GREY} {FLAGS}"]
     lines += [f"--{mark}  {label} | {FLAGS}" for mark, label in zip(MARKS, text("urgency"))]
     return "\n".join(lines)
@@ -812,7 +860,7 @@ def main(argv, plugin):
         if len(argv) > 2 and argv[2]:
             subprocess.run([CONFIG.cli, "panes", "focus", "--workspace", argv[1], "--pane", argv[2]], timeout=20)
         return 0
-    if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["resume"], ["resume-all"], ["dismiss"]) and CONFIG.demo:
+    if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"], ["dismiss"]) and CONFIG.demo:
         return 0
     if argv[:1] == ["resume"] and len(argv) > 2:
         resume(argv[1], argv[2], argv[3] if len(argv) > 3 else "")
@@ -838,6 +886,12 @@ def main(argv, plugin):
     if argv[:1] == ["unfocus"]:
         save_focus(None, 0)
         return 0
+    if argv[:1] == ["ignore"] and len(argv) > 2:
+        save_ignored(argv[1], float(argv[2]), now)
+        return 0
+    if argv[:1] == ["unignore"] and len(argv) > 1:
+        save_ignored(argv[1], None, now)
+        return 0
     try:
         radar = build(load_snapshot(), load_sessions(), load_failed_terminals(), load_snoozes(), now,
                       orchestrators=load_orchestrators(), opened=load_opened(),
@@ -845,7 +899,7 @@ def main(argv, plugin):
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
-    print(render(radar, plugin, now, load_focus(now)))
+    print(render(radar, plugin, now, load_focus(now), load_ignored(now)))
     return 0
 
 

@@ -39,6 +39,7 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 - Hover, then **Snooze**: 1 h, 2 h, until noon or 18:00, or tomorrow morning. New activity in the session brings it back sooner.
 - After a shutdown or a crash, the sessions that were open show under **Interrupted**. Click one to resume it in its workspace on the same conversation (`paradev agents create --resume-session`), or **Resume all** to bring them back one every two seconds. A row leaves once a live terminal holds its session again.
 - **Focus on a project**, then a duration: only that project shows and counts in the menu bar; the others fold into one "Other projects" submenu until the focus ends or you stop it.
+- **Ignore a project**, then a duration: the opposite of focus. That project leaves the list and the count, and waits in an "Ignored projects" submenu until the time is up or you pick **Stop ignoring**. Several projects can be ignored at once. To skip a project for good, use `ignore_projects` in the config.
 - `!` in the menu bar means the radar is broken. It never shows zero in that case.
 
 The menu never deletes a workspace and never types into a session. Resume is the one thing it starts: a Claude on a conversation that already existed, and only when you click it.
