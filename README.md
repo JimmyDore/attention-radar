@@ -19,6 +19,7 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | Open dialog: Paradev `blocked`, status `waiting`, or an unanswered `AskUserQuestion` or plan approval | snapshot, session file, transcript | 🔴 top of the list, even if the session is otherwise busy |
 | Last turn failed | Paradev `host.db` | 🔴 top of the list |
 | Status `busy` (thinking, tool, background subagent) or `shell` (background shell, `Monitor`) | `~/.claude/sessions/<pid>.json` | Hidden |
+| Status `shell`, but the turn ended on a question, or every background shell is a server listening on a TCP port | transcript, `ps` and `lsof` | Counted: a dev server never ends, so the session is waiting for you |
 | `ScheduleWakeup` or one-shot cron still to come | transcript | Hidden |
 | Recurring cron not deleted | transcript | Hidden |
 | Orchestrator whose worker is still running, with no unread report (opt-in, see below) | orchestrator records | Hidden |
@@ -120,7 +121,7 @@ Your orchestration tooling writes these files. The radar only reads them.
 
 ## Privacy
 
-The radar runs locally and makes no network calls. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files and the end of each transcript. It writes only its own state files (snoozes, opened rows, focus), and starts a Claude only when you click Resume.
+The radar runs locally and makes no network calls. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files, the end of each transcript, and the process list and listening ports (`ps`, `lsof`) when a session has a background shell. It writes only its own state files (snoozes, opened rows, focus), and starts a Claude only when you click Resume.
 
 ## Development
 

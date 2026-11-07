@@ -165,6 +165,7 @@ class Transcript:
     open_dialog: bool = False
     wake_at: Optional[float] = None
     recurring_cron: bool = False
+    asks: bool = False  # the turn ended on a question to you
 
 
 @dataclass
@@ -198,10 +199,17 @@ class Radar:
     warning: str = ""
 
 
-def classify(state, status, transcript, failed, now, activity_at=None):
-    """Decide where a session goes. `status` is None when no session file matched."""
+def classify(state, status, transcript, failed, now, activity_at=None, serving=False):
+    """Decide where a session goes. `status` is None when no session file matched.
+
+    `shell` means the turn is over but a background shell still runs. That shell is usually work
+    Claude waits on, but a dev server never ends: when the turn ended on a question, or every
+    background shell is a server listening on a port, the next move is yours."""
     if state == "blocked" or status == "waiting" or transcript.open_dialog:
         return Verdict(NEEDS, 0, "dialog")
+    if status == "shell" and (transcript.asks or serving) and not transcript.recurring_cron \
+            and not (transcript.wake_at and transcript.wake_at > now):
+        return Verdict(NEEDS)
     if status is None:
         return Verdict(HIDDEN) if state in ("working", "starting") else Verdict(NEEDS)
     if status in RUNNING_STATUSES or transcript.recurring_cron:
@@ -221,6 +229,7 @@ def parse_transcript(lines):
     info = Transcript()
     open_ids = set()
     crons = set()
+    asks = False
     for line in lines:
         try:
             entry = json.loads(line)
@@ -242,12 +251,16 @@ def parse_transcript(lines):
                 info.wake_at = result["nextFireAt"] / 1000
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
+            asks = asks and not (entry["type"] == "user" and isinstance(content, str) and content.strip())
             continue
         for block in content:
             kind = block.get("type") if isinstance(block, dict) else None
             if kind == "text" and entry["type"] == "assistant" and block.get("text", "").strip():
                 info.last_text = block["text"]
-            elif kind == "tool_use" and block.get("name") == "CronDelete":
+                asks = asks_question(block["text"])
+            elif kind == "tool_use" or (kind == "text" and entry["type"] == "user"):
+                asks = False
+            if kind == "tool_use" and block.get("name") == "CronDelete":
                 crons.discard((block.get("input") or {}).get("id"))
             elif kind == "tool_use" and block.get("name") in DIALOG_TOOLS:
                 open_ids.add(block.get("id"))
@@ -257,7 +270,20 @@ def parse_transcript(lines):
                 open_ids.discard(block.get("tool_use_id"))
     info.open_dialog = bool(open_ids)
     info.recurring_cron = bool(crons)
+    info.asks = asks
     return info
+
+
+def asks_question(content):
+    """A line outside code blocks that ends with a question mark, markdown and quotes aside."""
+    fenced = False
+    for raw in content.splitlines():
+        if raw.lstrip().startswith("```"):
+            fenced = not fenced
+            continue
+        if not fenced and raw.rstrip(" *_`\"'»)").endswith("?"):
+            return True
+    return False
 
 
 def _parse_iso(value):
@@ -404,6 +430,47 @@ def load_sessions():
         if session and (not current or session.get("startedAt", 0) > current.get("startedAt", 0)):
             sessions[terminal.group(1)] = session
     return sessions
+
+
+SHELLS = {"zsh", "bash", "sh", "fish", "dash"}
+
+
+def serving_sessions(sessions):
+    """Claude pids in status `shell` whose every background shell runs a server listening on TCP.
+
+    Claude Code starts each background shell as a shell child of its own process. A build or a
+    `Monitor` has no listening socket and keeps the session hidden; a dev server does not end."""
+    pids = {int(s["pid"]) for s in sessions.values() if s.get("status") == "shell" and s.get("pid")}
+    if not pids:
+        return set()
+    try:
+        table = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
+                               capture_output=True, text=True, timeout=5).stdout
+        listening = subprocess.run(["/usr/sbin/lsof", "-nP", "-iTCP", "-sTCP:LISTEN", "-Fp"],
+                                   capture_output=True, text=True, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return set()
+    return serving_pids(pids, table, listening)
+
+
+def serving_pids(pids, table, listening):
+    children, names = {}, {}
+    for line in table.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+            names[int(parts[0])] = os.path.basename(parts[2].strip()).lstrip("-")
+    servers = {int(l[1:]) for l in listening.splitlines() if l[:1] == "p" and l[1:].isdigit()}
+
+    def serves(pid, depth=0):
+        return pid in servers or (depth < 8 and any(serves(c, depth + 1) for c in children.get(pid, [])))
+
+    found = set()
+    for pid in pids:
+        shells = [c for c in children.get(pid, []) if names.get(c) in SHELLS]
+        if shells and all(serves(c) for c in shells):
+            found.add(pid)
+    return found
 
 
 def host_db_paths():
@@ -568,11 +635,12 @@ def pane_ids(workspace):
 
 
 def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subagents=newest_subagent_write,
-          orchestrators=None, opened=None, bindings=None, dismissed=None):
+          orchestrators=None, opened=None, bindings=None, dismissed=None, serving=None):
     radar = Radar()
     radar.interrupted = interrupted_rows(snapshot, bindings or [], dismissed or {})
     orchestrators = orchestrators or {}
     opened = opened or {}
+    serving = serving or set()
     running = running_workspaces(snapshot, sessions) if orchestrators else set()
     ignored = set(CONFIG.ignore_projects)
     agents = matched = 0
@@ -600,7 +668,8 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 updated = session.get("statusUpdatedAt")
                 writes = subagents(session)
                 activity_at = max([t for t in (updated and updated / 1000, writes) if t], default=None)
-            verdict = classify(agent.get("state"), status, transcript, terminal["id"] in failed, now, activity_at)
+            verdict = classify(agent.get("state"), status, transcript, terminal["id"] in failed, now, activity_at,
+                               serving=bool(session) and session.get("pid") in serving)
             if verdict.bucket == NEEDS and verdict.rank and waits_on_worker(terminal["id"], orchestrators, running):
                 verdict = Verdict(HIDDEN)
             if verdict.bucket == HIDDEN:
@@ -893,9 +962,10 @@ def main(argv, plugin):
         save_ignored(argv[1], None, now)
         return 0
     try:
-        radar = build(load_snapshot(), load_sessions(), load_failed_terminals(), load_snoozes(), now,
+        sessions = load_sessions()
+        radar = build(load_snapshot(), sessions, load_failed_terminals(), load_snoozes(), now,
                       orchestrators=load_orchestrators(), opened=load_opened(),
-                      bindings=load_bindings(now), dismissed=load_dismissed())
+                      bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions))
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0

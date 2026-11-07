@@ -24,8 +24,8 @@ class Base(unittest.TestCase):
 
 
 class Classify(Base):
-    def verdict(self, state="idle", status="idle", transcript=None, failed=False, activity=None):
-        return ar.classify(state, status, transcript or t(last_ts=NOW - 10), failed, NOW, activity)
+    def verdict(self, state="idle", status="idle", transcript=None, failed=False, activity=None, serving=False):
+        return ar.classify(state, status, transcript or t(last_ts=NOW - 10), failed, NOW, activity, serving)
 
     def test_idle_with_nothing_running_needs_you(self):
         self.assertEqual(self.verdict().bucket, ar.NEEDS)
@@ -33,6 +33,15 @@ class Classify(Base):
     def test_background_shell_or_subagent_is_hidden_even_if_paradev_says_idle(self):
         self.assertEqual(self.verdict(status="shell").bucket, ar.HIDDEN)
         self.assertEqual(self.verdict(status="busy").bucket, ar.HIDDEN)
+
+    def test_background_shell_with_a_question_or_a_server_needs_you(self):
+        self.assertEqual(self.verdict(status="shell", transcript=t(last_ts=NOW - 10, asks=True)).bucket, ar.NEEDS)
+        self.assertEqual(self.verdict(status="shell", serving=True).bucket, ar.NEEDS)
+
+    def test_busy_or_a_coming_wakeup_beats_the_question(self):
+        self.assertEqual(self.verdict(status="busy", transcript=t(asks=True), serving=True).bucket, ar.HIDDEN)
+        waking = t(last_ts=NOW - 10, asks=True, wake_at=NOW + 60)
+        self.assertEqual(self.verdict(status="shell", transcript=waking).bucket, ar.HIDDEN)
 
     def test_dialog_beats_busy_and_ranks_first(self):
         for verdict in (
@@ -100,6 +109,17 @@ class ParseTranscript(Base):
                                   "input": {"questions": [{"question": "red or blue?"}]}}])
         self.assertEqual(ar.parse_transcript([ask]).dialog_text, "red or blue?")
 
+    def test_turn_that_ends_on_a_question_asks(self):
+        ask = line("assistant", [{"type": "text", "text": "Done.\n\n**Ça te va comme ça ?**\n\n➡️ Oui."}])
+        self.assertTrue(ar.parse_transcript([ask]).asks)
+        tool = line("assistant", [{"type": "tool_use", "id": "b", "name": "Bash"}])
+        self.assertFalse(ar.parse_transcript([ask, tool]).asks)
+        self.assertFalse(ar.parse_transcript([ask, line("user", "go")]).asks)
+
+    def test_question_marks_in_code_or_mid_line_do_not_ask(self):
+        self.assertFalse(ar.asks_question("Server on http://x/?a=1 is up.\n```\nwhat?\n```"))
+        self.assertTrue(ar.asks_question("Je lance ?\n"))
+
     def test_wakeup_time_is_read_in_seconds(self):
         info = ar.parse_transcript([line("user", [], toolUseResult={"scheduledFor": 1793812380000})])
         self.assertEqual(info.wake_at, 1793812380.0)
@@ -115,6 +135,30 @@ class ParseTranscript(Base):
         made = line("user", [], toolUseResult={"id": "c1", "recurring": False, "nextFireAt": 1793902316000})
         info = ar.parse_transcript([made])
         self.assertEqual((info.wake_at, info.recurring_cron), (1793902316.0, False))
+
+
+class Serving(Base):
+    TABLE = "\n".join([
+        "  100     1 claude", "  101   100 /bin/zsh", "  102   101 uv", "  103   102 python3",
+        "  104   100 python3",
+        "  200     1 claude", "  201   200 /bin/zsh", "  202   201 npm",
+        "  300     1 claude", "  301   300 -zsh", "  302   300 /bin/zsh", "  303   302 node",
+        "  400     1 claude", "  401   400 python3",
+    ])
+    LISTEN = "p103\nf9\np303\nf3\np401\n"
+
+    def test_only_sessions_whose_every_shell_listens_are_serving(self):
+        found = ar.serving_pids({100, 200, 300, 400}, self.TABLE, self.LISTEN)
+        # 200: a build with no socket; 300: one shell serves, the other still runs; 400: no shell at all.
+        self.assertEqual(found, {100})
+
+    def test_build_passes_serving_through(self):
+        sessions = {"t1": {"status": "shell", "sessionId": "s", "pid": 100}}
+        quiet = lambda s: t(last_ts=NOW - 60, last_text="Server up.")
+        hidden = ar.build(snapshot(term()), sessions, set(), {}, NOW, read=quiet, subagents=lambda s: None)
+        shown = ar.build(snapshot(term()), sessions, set(), {}, NOW, read=quiet, subagents=lambda s: None,
+                         serving={100})
+        self.assertEqual((len(hidden.rows), len(shown.rows)), (0, 1))
 
 
 class Snooze(Base):
