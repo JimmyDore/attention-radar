@@ -358,7 +358,7 @@ class Interrupted(Base):
         radar = ar.Radar(interrupted=self.rows(snapshot(), [binding()]))
         out = ar.render(radar, "/p", NOW)
         self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full")
-        self.assertIn('param1="resume" param2="w1" param3="s1" param4="claude"', out)
+        self.assertIn('param1="resume" param2="w1" param3="dead" param4=""', out)
         self.assertIn('param1="resume-all"', out)
         self.assertIn('param1="dismiss" param2="s1"', out)
         self.assertNotIn("Inbox zero", out)
@@ -370,10 +370,95 @@ class Interrupted(Base):
         self.assertIn("Other projects  ·  1", out)
         self.assertIn('param1="resume-all" param2="side"', out)
 
+    def test_knows_the_pane_the_session_died_in(self):
+        snap = snapshot()
+        snap["workspaces"][0]["layout"] = {"tabs": [{"panes": [{"id": "p9", "terminalId": "dead"}]}]}
+        row = self.rows(snap, [binding()])[0]
+        self.assertEqual(row.pane_id, "p9")
+        out = ar.render(ar.Radar(interrupted=[row]), "/p", NOW)
+        self.assertIn('param1="resume" param2="w1" param3="dead" param4="p9"', out)
+        self.assertIn('param1="open" param2="w1" param3="p9"', out)
+
     def test_build_passes_bindings_through(self):
         radar = ar.build(snapshot(), {}, set(), {}, NOW, read=lambda s: t(), subagents=lambda s: None,
                          bindings=[binding()])
         self.assertEqual(len(radar.interrupted), 1)
+
+
+class Resume(Base):
+    """Paradev resumes a dead pane in place; the radar asks it to, instead of opening a second terminal."""
+
+    def host(self, folder, terminal="dead"):
+        os.makedirs(os.path.join(folder, "h"))
+        path = os.path.join(folder, "h", "host.db")
+        import sqlite3
+        connection = sqlite3.connect(path)
+        connection.execute("create table terminal_agent_bindings (terminal_id text)")
+        connection.execute("insert into terminal_agent_bindings values (?)", (terminal,))
+        connection.commit()
+        connection.close()
+        with open(os.path.join(folder, "h", "manifest.json"), "w") as handle:
+            json.dump({"endpoint": "http://127.0.0.1:1", "authToken": "tok"}, handle)
+        ar.configure(ar.Config(host_dbs=[os.path.join(folder, "*", "host.db")]))
+
+    def test_calls_paradev_resume_on_the_host_that_knows_the_terminal(self):
+        calls = []
+        with tempfile.TemporaryDirectory() as folder:
+            self.host(folder)
+            old = ar.host_call
+            ar.host_call = lambda host, proc, payload, timeout=60: calls.append((host, proc, payload)) or {"resumed": True}
+            try:
+                self.assertTrue(ar.resume("w1", "dead"))
+                self.assertFalse(ar.resume("w1", "unknown"))
+            finally:
+                ar.host_call = old
+        self.assertEqual(calls, [(("http://127.0.0.1:1", "tok"), "terminalAgents.resume",
+                                  {"workspaceId": "w1", "terminalId": "dead"})])
+
+    def test_unreachable_host_is_not_a_crash(self):
+        with tempfile.TemporaryDirectory() as folder:
+            self.host(folder)
+            self.assertFalse(ar.resume("w1", "dead"))
+
+
+PS = """1 0 launchd
+10 1 Superset
+20 10 -zsh
+30 20 claude
+31 30 node
+32 31 zsh
+40 10 zsh
+41 40 claude
+"""
+
+
+class Pause(Base):
+    """Pausing ends the terminal the way a crash does, so Paradev keeps the session resumable."""
+
+    def test_kills_claude_first_its_children_then_the_terminal_shell(self):
+        self.assertEqual(ar.terminal_processes(30, PS), [30, 31, 32, 20])
+
+    def test_only_idle_sessions_are_paused(self):
+        killed = []
+        sessions = {"a": {"pid": 30, "status": "idle"}, "b": {"pid": 41, "status": "busy"}}
+        count = ar.pause(["a", "b", "missing"], sessions, PS, kill=lambda pid, sig: killed.append(pid))
+        self.assertEqual((count, killed), (1, [30, 31, 32, 20]))
+
+    def row(self, status, project="acme", terminal="t1"):
+        row = ar.Row("w1", terminal, "feature", project, ar.Verdict(ar.NEEDS), NOW - 60, "", "r")
+        row.status = status
+        return row
+
+    def test_offered_on_a_finished_turn_and_for_the_whole_project(self):
+        rows = [self.row("idle"), self.row("waiting", terminal="t2"), self.row("", terminal="t3")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW)
+        self.assertEqual(out.count('param1="pause" param2="t'), 3)
+        self.assertIn('param1="pause" param2="t1" param3="t2" terminal', out)
+        self.assertIn("Pause all 2", out)
+
+    def test_project_header_without_pausable_rows_stays_plain(self):
+        out = ar.render(ar.Radar(rows=[self.row("")]), "/p", NOW)
+        self.assertNotIn('param1="pause"', out)
 
 
 class Orchestrator(Base):

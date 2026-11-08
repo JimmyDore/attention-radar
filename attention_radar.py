@@ -1,7 +1,8 @@
 """Menu bar inbox: Claude Code sessions in Paradev (formerly Superset) that wait for you.
 
 Reads only: the Paradev CLI and host database, Claude Code session files and transcripts,
-and optional orchestrator records. Writes only: the snooze file. Never sends anything to a session.
+and optional orchestrator records. Writes only its own state files. Never types into a session:
+the only sessions it touches are the ones you click Resume or Pause on.
 """
 import datetime as dt
 import glob
@@ -10,10 +11,12 @@ import json
 import os
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import time
+import urllib.request
 from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional
 
@@ -30,6 +33,8 @@ EXCERPT_CHARS = 90
 DIALOG_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 PLACEHOLDER_NAMES = {"local", "main"}
 RUNNING_STATUSES = {"busy", "shell"}
+# A session you can pause: its turn is over, so killing it loses nothing the transcript lacks.
+PAUSABLE_STATUSES = {"idle", "waiting", "shell"}
 INTERRUPTED_DAYS = 7
 
 NEEDS = "needs"
@@ -105,10 +110,12 @@ TEXTS = {
         "ignored": "Ignored projects  ·  {count}",
         "ignored_until": "{project} until {time}",
         "unignore": "Stop ignoring",
-        "interrupted": "INTERRUPTED  ·  {count}  ·  terminal gone, conversation kept",
+        "interrupted": "INTERRUPTED OR PAUSED  ·  {count}  ·  terminal gone, conversation kept",
         "resume": "Resume",
         "resume_all": "Resume all {count}",
         "dismiss": "Dismiss",
+        "pause": "Pause (frees memory)",
+        "pause_all": "Pause all {count}",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
@@ -131,10 +138,12 @@ TEXTS = {
         "ignored": "Projets ignorés  ·  {count}",
         "ignored_until": "{project} jusqu'à {time}",
         "unignore": "Ne plus ignorer",
-        "interrupted": "INTERROMPUES  ·  {count}  ·  terminal fermé, conversation gardée",
+        "interrupted": "INTERROMPUES OU EN PAUSE  ·  {count}  ·  terminal fermé, conversation gardée",
         "resume": "Reprendre",
         "resume_all": "Tout reprendre ({count})",
         "dismiss": "Ignorer",
+        "pause": "Mettre en pause (libère la mémoire)",
+        "pause_all": "Tout mettre en pause ({count})",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
@@ -189,6 +198,11 @@ class Row:
     pane_id: str = ""
     opened: bool = False
     agent: str = ""
+    status: str = ""  # the Claude session's own status, empty when no session file matched
+
+    @property
+    def pausable(self):
+        return self.verdict.bucket == NEEDS and self.status in PAUSABLE_STATUSES
 
 
 @dataclass
@@ -453,13 +467,44 @@ def serving_sessions(sessions):
     return serving_pids(pids, table, listening)
 
 
-def serving_pids(pids, table, listening):
-    children, names = {}, {}
+def process_table(table):
+    """`ps -o pid=,ppid=,comm=` output -> (children by pid, parent by pid, short name by pid)."""
+    children, parents, names = {}, {}, {}
     for line in table.splitlines():
         parts = line.split(None, 2)
         if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
             children.setdefault(int(parts[1]), []).append(int(parts[0]))
+            parents[int(parts[0])] = int(parts[1])
             names[int(parts[0])] = os.path.basename(parts[2].strip()).lstrip("-")
+    return children, parents, names
+
+
+def terminal_processes(claude_pid, table):
+    """Every process of the terminal a Claude runs in, Claude first, the terminal's own shell last.
+
+    Paradev types `claude` into a login shell, so Claude exiting alone leaves the terminal open and
+    tells Paradev the session ended for good. The terminal dying with it is what Paradev reads as a
+    crash, and a crash it offers to resume in the same pane."""
+    children, parents, names = process_table(table)
+    root = claude_pid
+    while names.get(parents.get(root)) in SHELLS:
+        root = parents[root]
+    others = sorted(_descendants(root, children) - {claude_pid})
+    return [claude_pid] + others + ([root] if root != claude_pid else [])
+
+
+def _descendants(pid, children):
+    seen, todo = set(), list(children.get(pid, []))
+    while todo:
+        current = todo.pop()
+        if current not in seen:
+            seen.add(current)
+            todo += children.get(current, [])
+    return seen
+
+
+def serving_pids(pids, table, listening):
+    children, _, names = process_table(table)
     servers = {int(l[1:]) for l in listening.splitlines() if l[:1] == "p" and l[1:].isdigit()}
 
     def serves(pid, depth=0):
@@ -542,6 +587,8 @@ def interrupted_rows(snapshot, bindings, dismissed=()):
                   workspace.get("project") or "", Verdict(INTERRUPTED), (binding["last_event_at"] or 0) / 1000,
                   "", session_id=session_id)
         row.agent = binding["agent_id"] or "claude"
+        # The pane keeps the dead terminal's id: Paradev resumes the session there when it shows.
+        row.pane_id = pane_ids(workspace).get(binding["terminal_id"], "")
         rows.append(row)
     rows.sort(key=lambda r: -(r.since or 0))
     return rows
@@ -688,6 +735,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), transcript.last_ts_raw, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
+            row.status = status or ""
             row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
@@ -736,6 +784,9 @@ def _row_lines(row, plugin, now, mark, depth=0):
         for label, until in snooze_choices(now):
             action = _params(plugin, "snooze", row.terminal_id, row.activity, int(until))
             lines.append(f"{p}----{label} | {action} refresh=true {FLAGS}")
+    if row.pausable:
+        lines.append(f"{p}--{text('pause')} | sfimage=pause.circle {_params(plugin, 'pause', row.terminal_id)} "
+                     f"refresh=true {FLAGS}")
     return lines
 
 
@@ -751,7 +802,13 @@ def _groups(rows, plugin, now, depth=0):
     for index, (project, members) in enumerate(groups.items()):
         if index:
             lines.append(f"{p}---")
-        lines.append(f"{p}{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY} {FLAGS}")
+        pausable = [r.terminal_id for r in members if r.pausable]
+        # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
+        lines.append(f"{p}{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY}"
+                     f"{' refresh=true' if pausable else ''} {FLAGS}")
+        if pausable:
+            lines.append(f"{p}--{text('pause_all', count=len(pausable))} | sfimage=pause.circle "
+                         f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
         for row in members:
             lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
     if checks:
@@ -773,8 +830,9 @@ def _interrupted_lines(rows, plugin, depth=0):
              f"{p}{text('resume_all', count=len(rows))} | sfimage=arrow.clockwise "
              f"{_params(plugin, 'resume-all', *([scope] if scope else []))} refresh=true {FLAGS}"]
     for row in rows:
-        resume = _params(plugin, "resume", row.workspace_id, row.session_id, row.agent)
-        opener = _params(plugin, "open", row.workspace_id)
+        resume = _params(plugin, "resume", row.workspace_id, row.terminal_id, row.pane_id)
+        # Showing the dead pane is enough for Paradev to resume it there.
+        opener = _params(plugin, "open", row.workspace_id, row.pane_id)
         lines.append(f"{p}↻  {_safe(row.label)}  ·  {_safe(row.project)} | {resume} refresh=true length=55 {FLAGS}")
         lines.append(f"{p}--{text('resume')} | sfimage=arrow.clockwise {resume} refresh=true {FLAGS}")
         lines.append(f"{p}--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=false {FLAGS}")
@@ -877,10 +935,78 @@ def error_output(message):
     return "\n".join(["! | sfimage=exclamationmark.triangle", "---", f"{_safe(message)} | {FLAGS}"])
 
 
-def resume(workspace_id, session_id, agent):
-    """Start the agent again in its workspace on the same conversation."""
-    subprocess.run([CONFIG.cli, "agents", "create", "--local", "--workspace", workspace_id, "--agent", agent or "claude",
-                    "--resume-session", session_id], capture_output=True, timeout=30)
+def host_of(terminal_id):
+    """The local Paradev host service (endpoint, token) whose database knows this terminal."""
+    for path in host_db_paths():
+        manifest = _load_json(os.path.join(os.path.dirname(path), "manifest.json"))
+        if not (manifest.get("endpoint") and manifest.get("authToken")):
+            continue
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+            try:
+                known = connection.execute("select 1 from terminal_agent_bindings where terminal_id = ?",
+                                           (terminal_id,)).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            continue
+        if known:
+            return manifest["endpoint"], manifest["authToken"]
+    return None
+
+
+def host_call(host, procedure, payload, timeout=60):
+    endpoint, token = host
+    request = urllib.request.Request(
+        f"{endpoint}/trpc/{procedure}", data=json.dumps({"json": payload}).encode(), method="POST",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.load(response)["result"]["data"]["json"]
+
+
+def resume(workspace_id, terminal_id):
+    """Have Paradev resume the session the way it does when you look at the dead pane.
+
+    Paradev claims the dead terminal, so the session can never start twice, and the pane that held
+    it picks the new terminal up. `paradev agents create --resume-session` did neither: it opened a
+    second tab, and Paradev later resumed the old pane as well. False when Paradev declined: right
+    after a reboot, before it has marked the terminal as exited, the pane resumes once it shows."""
+    host = host_of(terminal_id)
+    if not host:
+        return False
+    try:
+        result = host_call(host, "terminalAgents.resume", {"workspaceId": workspace_id, "terminalId": terminal_id})
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    return bool(result and result.get("resumed"))
+
+
+def pause(terminal_ids, sessions=None, table=None, kill=os.kill):
+    """End these sessions' terminals the way a crash does, so they come back under Interrupted.
+
+    Only a session whose turn is over: a running turn would lose what it has not written yet."""
+    sessions = load_sessions() if sessions is None else sessions
+    if table is None:
+        table = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
+                               capture_output=True, text=True, timeout=5).stdout
+    paused = 0
+    for terminal_id in terminal_ids:
+        session = sessions.get(terminal_id)
+        if not session or not session.get("pid") or session.get("status") not in PAUSABLE_STATUSES:
+            continue
+        for pid in terminal_processes(int(session["pid"]), table):
+            try:
+                kill(pid, signal.SIGKILL)  # no SessionEnd hook, which would tell Paradev it ended for good
+            except OSError:
+                pass
+        paused += 1
+    return paused
+
+
+def open_workspace(workspace_id, pane_id=""):
+    subprocess.run([CONFIG.cli, "workspaces", "open", "--local", workspace_id], timeout=20)
+    if pane_id:
+        subprocess.run([CONFIG.cli, "panes", "focus", "--workspace", workspace_id, "--pane", pane_id], timeout=20)
 
 
 def load_snapshot():
@@ -925,15 +1051,17 @@ def main(argv, plugin):
     if argv[:1] == ["open"] and not argv[1].startswith("demo-"):
         if len(argv) > 3 and argv[3]:
             save_opened(argv[3], argv[4] if len(argv) > 4 else "", now)
-        subprocess.run([CONFIG.cli, "workspaces", "open", "--local", argv[1]], timeout=20)
-        if len(argv) > 2 and argv[2]:
-            subprocess.run([CONFIG.cli, "panes", "focus", "--workspace", argv[1], "--pane", argv[2]], timeout=20)
+        open_workspace(argv[1], argv[2] if len(argv) > 2 else "")
         return 0
-    if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"], ["dismiss"]) and CONFIG.demo:
+    if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"],
+                    ["dismiss"], ["pause"]) and CONFIG.demo:
         return 0
     if argv[:1] == ["resume"] and len(argv) > 2:
-        resume(argv[1], argv[2], argv[3] if len(argv) > 3 else "")
-        subprocess.run([CONFIG.cli, "workspaces", "open", "--local", argv[1]], timeout=20)
+        resume(argv[1], argv[2])
+        open_workspace(argv[1], argv[3] if len(argv) > 3 else "")
+        return 0
+    if argv[:1] == ["pause"]:
+        pause(argv[1:])
         return 0
     if argv[:1] == ["dismiss"] and len(argv) > 1:
         save_dismissed(argv[1], now)
@@ -942,7 +1070,7 @@ def main(argv, plugin):
         project = argv[1] if len(argv) > 1 else None
         for row in interrupted_rows(load_snapshot(), load_bindings(now), load_dismissed()):
             if project is None or row.project == project:
-                resume(row.workspace_id, row.session_id, row.agent)
+                resume(row.workspace_id, row.terminal_id)
                 time.sleep(2)  # one Claude at a time starting up, not twenty at once
         return 0
     if argv[:1] == ["snooze"]:

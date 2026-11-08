@@ -24,7 +24,7 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | Recurring cron not deleted | transcript | Hidden |
 | Orchestrator whose worker is still running, with no unread report (opt-in, see below) | orchestrator records | Hidden |
 | Anything else | | Counted, oldest first |
-| Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
+| Terminal gone but the session never closed (shutdown, crash, **Pause**) | Paradev `host.db` | ↻ "Interrupted or paused" at the top, counted, with **Resume** |
 
 Rows are grouped by project. The dot shows how long a session has been waiting: 🟠 under 1 h, 🟡 1 to 24 h, ⚪ over 24 h (probably finished: delete the workspace).
 
@@ -38,12 +38,13 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 - Click a row to open its workspace in Paradev, on the right pane.
 - A row you opened moves to the end of its group until the session writes again, so you don't open it twice while the radar catches up.
 - Hover, then **Snooze**: 1 h, 2 h, until noon or 18:00, or tomorrow morning. New activity in the session brings it back sooner.
-- After a shutdown or a crash, the sessions that were open show under **Interrupted**. Click one to resume it in its workspace on the same conversation (`paradev agents create --resume-session`), or **Resume all** to bring them back one every two seconds. A row leaves once a live terminal holds its session again.
+- After a shutdown or a crash, the sessions that were open show under **Interrupted or paused**. Click one to resume it on the same conversation, in the pane it died in, or **Resume all** to bring them back one every two seconds. The radar asks Paradev's host service to resume it (`terminalAgents.resume`), which is what Paradev does when you look at the dead pane: the pane picks the new terminal up, and a session can't be started twice. **Open** works too: showing the dead pane makes Paradev resume it. A row leaves once a live terminal holds its session again.
+- Too much open at once? Hover a row, then **Pause** to stop that Claude and free its memory, or hover a project's header for **Pause all**. Only a session whose turn is over can be paused. The radar ends the terminal the way a crash does, so Paradev keeps the session resumable: it shows under **Interrupted or paused**, and resumes in its own pane when you click **Resume** or look at that pane. A paused pane that is on screen in Paradev resumes right away.
 - **Focus on a project**, then a duration: only that project shows and counts in the menu bar; the others fold into one "Other projects" submenu until the focus ends or you stop it.
 - **Ignore a project**, then a duration: the opposite of focus. That project leaves the list and the count, and waits in an "Ignored projects" submenu until the time is up or you pick **Stop ignoring**. Several projects can be ignored at once. To skip a project for good, use `ignore_projects` in the config.
 - `!` in the menu bar means the radar is broken. It never shows zero in that case.
 
-The menu never deletes a workspace and never types into a session. Resume is the one thing it starts: a Claude on a conversation that already existed, and only when you click it.
+The menu never deletes a workspace and never types into a session. Resume is the one thing it starts: a Claude on a conversation that already existed, and only when you click it. Pause is the one thing it stops, also only when you click it.
 
 ## Install
 
@@ -121,7 +122,7 @@ Your orchestration tooling writes these files. The radar only reads them.
 
 ## Privacy
 
-The radar runs locally and makes no network calls. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files, the end of each transcript, and the process list and listening ports (`ps`, `lsof`) when a session has a background shell. It writes only its own state files (snoozes, opened rows, focus), and starts a Claude only when you click Resume.
+The radar runs locally and makes no network calls, apart from Resume asking Paradev's host service on `127.0.0.1`. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files, the end of each transcript, and the process list and listening ports (`ps`, `lsof`) when a session has a background shell. It writes only its own state files (snoozes, opened rows, focus), starts a Claude only when you click Resume, and stops one only when you click Pause.
 
 ## Development
 
