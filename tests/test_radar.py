@@ -442,7 +442,26 @@ class Pause(Base):
         killed = []
         sessions = {"a": {"pid": 30, "status": "idle"}, "b": {"pid": 41, "status": "busy"}}
         count = ar.pause(["a", "b", "missing"], sessions, PS, kill=lambda pid, sig: killed.append(pid))
-        self.assertEqual((count, killed), (1, [30, 31, 32, 20]))
+        self.assertEqual((count, killed), (["a"], [30, 31, 32, 20]))
+
+    def test_paused_sessions_wait_apart_and_do_not_count(self):
+        radar = ar.build(snapshot(), {}, set(), {}, NOW, read=lambda s: t(), subagents=lambda s: None,
+                         bindings=[binding(), binding("other", session="s2", ended=9, reason="terminal-exited")],
+                         paused={"dead": NOW})
+        self.assertEqual(([r.terminal_id for r in radar.paused], [r.terminal_id for r in radar.interrupted]),
+                         (["dead"], ["other"]))
+        out = ar.render(ar.Radar(paused=radar.paused), "/p", NOW)
+        self.assertEqual(out.splitlines()[0], "0 | sfimage=checkmark.circle")
+        self.assertIn("Paused (1) | sfimage=pause.circle refresh=true", out)
+        self.assertIn('param1="resume-paused"', out)
+        self.assertIn('--feature-1  ·  acme | bash="/p" param1="resume" param2="w1" param3="dead"', out)
+
+    def test_pause_is_remembered_by_terminal(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "p.json")
+            ar.save_paused(["old"], NOW - 9 * 86400, path)
+            ar.save_paused(["new"], NOW, path)
+            self.assertEqual(ar.load_paused(path), {"new": NOW})
 
     def row(self, status, project="acme", terminal="t1"):
         row = ar.Row("w1", terminal, "feature", project, ar.Verdict(ar.NEEDS), NOW - 60, "", "r")

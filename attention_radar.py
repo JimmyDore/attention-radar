@@ -59,6 +59,7 @@ class Config:
     focus_file: str = os.path.join(STATE_DIR, "focus.json")
     ignored_file: str = os.path.join(STATE_DIR, "ignored.json")
     dismissed_file: str = os.path.join(STATE_DIR, "dismissed.json")
+    paused_file: str = os.path.join(STATE_DIR, "paused.json")
     demo: bool = False
 
     @property
@@ -110,12 +111,13 @@ TEXTS = {
         "ignored": "Ignored projects  ·  {count}",
         "ignored_until": "{project} until {time}",
         "unignore": "Stop ignoring",
-        "interrupted": "INTERRUPTED OR PAUSED  ·  {count}  ·  terminal gone, conversation kept",
+        "interrupted": "INTERRUPTED  ·  {count}  ·  terminal gone, conversation kept",
         "resume": "Resume",
         "resume_all": "Resume all {count}",
         "dismiss": "Dismiss",
         "pause": "Pause (frees memory)",
         "pause_all": "Pause all {count}",
+        "paused": "Paused ({count})",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
@@ -138,12 +140,13 @@ TEXTS = {
         "ignored": "Projets ignorés  ·  {count}",
         "ignored_until": "{project} jusqu'à {time}",
         "unignore": "Ne plus ignorer",
-        "interrupted": "INTERROMPUES OU EN PAUSE  ·  {count}  ·  terminal fermé, conversation gardée",
+        "interrupted": "INTERROMPUES  ·  {count}  ·  terminal fermé, conversation gardée",
         "resume": "Reprendre",
         "resume_all": "Tout reprendre ({count})",
         "dismiss": "Ignorer",
         "pause": "Mettre en pause (libère la mémoire)",
         "pause_all": "Tout mettre en pause ({count})",
+        "paused": "En pause ({count})",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
@@ -210,6 +213,7 @@ class Radar:
     rows: List[Row] = field(default_factory=list)
     snoozed: List[Row] = field(default_factory=list)
     interrupted: List[Row] = field(default_factory=list)
+    paused: List[Row] = field(default_factory=list)
     warning: str = ""
 
 
@@ -388,6 +392,20 @@ def save_dismissed(session_id, now, path=None):
     dismissed = {k: v for k, v in load_dismissed(path).items() if v > keep}
     dismissed[session_id] = now
     _save_json(path, dismissed)
+
+
+def load_paused(path=None):
+    return _load_json(path or CONFIG.paused_file)
+
+
+def save_paused(terminal_ids, now, path=None):
+    """The terminals you paused, so their sessions wait under Paused, apart from the ones a crash killed.
+    Keyed by the dead terminal: once resumed, the session runs in another one, and a later crash shows."""
+    path = path or CONFIG.paused_file
+    keep = now - (INTERRUPTED_DAYS + 1) * 86400
+    paused = {k: v for k, v in load_paused(path).items() if v > keep}
+    paused.update({terminal_id: now for terminal_id in terminal_ids})
+    _save_json(path, paused)
 
 
 def save_opened(terminal_id, activity, now, path=None):
@@ -682,9 +700,10 @@ def pane_ids(workspace):
 
 
 def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subagents=newest_subagent_write,
-          orchestrators=None, opened=None, bindings=None, dismissed=None, serving=None):
+          orchestrators=None, opened=None, bindings=None, dismissed=None, serving=None, paused=None):
     radar = Radar()
-    radar.interrupted = interrupted_rows(snapshot, bindings or [], dismissed or {})
+    for row in interrupted_rows(snapshot, bindings or [], dismissed or {}):
+        (radar.paused if row.terminal_id in (paused or {}) else radar.interrupted).append(row)
     orchestrators = orchestrators or {}
     opened = opened or {}
     serving = serving or set()
@@ -857,6 +876,23 @@ def _ignored_lines(ignored, rows, lost, plugin, now):
     return lines + _groups(rows, plugin, now, depth=1)
 
 
+def _paused_lines(rows, plugin):
+    """Sessions you paused: set aside like snoozed ones, not counted, one click from coming back."""
+    if not rows:
+        return []
+    lines = ["---", f"{text('paused', count=len(rows))} | sfimage=pause.circle refresh=true {FLAGS}",
+             f"--{text('resume_all', count=len(rows))} | sfimage=arrow.clockwise "
+             f"{_params(plugin, 'resume-paused')} refresh=true {FLAGS}", "-----"]
+    for row in rows:
+        resume = _params(plugin, "resume", row.workspace_id, row.terminal_id, row.pane_id)
+        lines.append(f"--{_safe(row.label)}  ·  {_safe(row.project)} | {resume} refresh=true length=55 {FLAGS}")
+        lines.append(f"----{text('resume')} | sfimage=arrow.clockwise {resume} refresh=true {FLAGS}")
+        lines.append(f"----{text('open')} | sfimage=arrow.up.forward.app "
+                     f"{_params(plugin, 'open', row.workspace_id, row.pane_id)} refresh=false {FLAGS}")
+        lines.append(f"----{text('dismiss')} | sfimage=xmark {_params(plugin, 'dismiss', row.session_id)} refresh=true {FLAGS}")
+    return lines
+
+
 def render(radar, plugin, now, focus=None, ignored=None):
     ignored = ignored or {}
     project = focus["project"] if focus else None
@@ -893,6 +929,7 @@ def render(radar, plugin, now, focus=None, ignored=None):
         for row in radar.snoozed:
             opener = _params(plugin, "open", row.workspace_id, row.pane_id)
             lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
+    lines += _paused_lines(radar.paused, plugin)
     lines += _ignored_lines(ignored, [r for r in radar.rows if r.project in ignored],
                             [r for r in radar.interrupted if r.project in ignored], plugin, now)
     projects = list(dict.fromkeys(r.project for r in rows + interrupted if r.project))
@@ -989,7 +1026,7 @@ def pause(terminal_ids, sessions=None, table=None, kill=os.kill):
     if table is None:
         table = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
                                capture_output=True, text=True, timeout=5).stdout
-    paused = 0
+    paused = []
     for terminal_id in terminal_ids:
         session = sessions.get(terminal_id)
         if not session or not session.get("pid") or session.get("status") not in PAUSABLE_STATUSES:
@@ -999,7 +1036,7 @@ def pause(terminal_ids, sessions=None, table=None, kill=os.kill):
                 kill(pid, signal.SIGKILL)  # no SessionEnd hook, which would tell Paradev it ended for good
             except OSError:
                 pass
-        paused += 1
+        paused.append(terminal_id)
     return paused
 
 
@@ -1054,22 +1091,23 @@ def main(argv, plugin):
         open_workspace(argv[1], argv[2] if len(argv) > 2 else "")
         return 0
     if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"],
-                    ["dismiss"], ["pause"]) and CONFIG.demo:
+                    ["dismiss"], ["pause"], ["resume-paused"]) and CONFIG.demo:
         return 0
     if argv[:1] == ["resume"] and len(argv) > 2:
         resume(argv[1], argv[2])
         open_workspace(argv[1], argv[3] if len(argv) > 3 else "")
         return 0
     if argv[:1] == ["pause"]:
-        pause(argv[1:])
+        save_paused(pause(argv[1:]), now)
         return 0
     if argv[:1] == ["dismiss"] and len(argv) > 1:
         save_dismissed(argv[1], now)
         return 0
-    if argv[:1] == ["resume-all"]:
+    if argv[:1] in (["resume-all"], ["resume-paused"]):
         project = argv[1] if len(argv) > 1 else None
+        paused = load_paused()
         for row in interrupted_rows(load_snapshot(), load_bindings(now), load_dismissed()):
-            if project is None or row.project == project:
+            if (row.terminal_id in paused) == (argv[0] == "resume-paused") and (project is None or row.project == project):
                 resume(row.workspace_id, row.terminal_id)
                 time.sleep(2)  # one Claude at a time starting up, not twenty at once
         return 0
@@ -1093,7 +1131,8 @@ def main(argv, plugin):
         sessions = load_sessions()
         radar = build(load_snapshot(), sessions, load_failed_terminals(), load_snoozes(), now,
                       orchestrators=load_orchestrators(), opened=load_opened(),
-                      bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions))
+                      bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions),
+                      paused=load_paused())
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
