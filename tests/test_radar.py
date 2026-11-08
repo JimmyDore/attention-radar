@@ -454,7 +454,19 @@ class Pause(Base):
         self.assertEqual(out.splitlines()[0], "0 | sfimage=checkmark.circle")
         self.assertIn("Paused (1) | sfimage=pause.circle refresh=true", out)
         self.assertIn('param1="resume-paused"', out)
-        self.assertIn('--feature-1  ·  acme | bash="/p" param1="resume" param2="w1" param3="dead"', out)
+        self.assertIn('--feature-1 | bash="/p" param1="resume" param2="w1" param3="dead"', out)
+
+    def test_paused_grouped_by_project_each_resumable_at_once(self):
+        def row(terminal, project):
+            return ar.Row("w1", terminal, terminal, project, ar.Verdict(ar.INTERRUPTED), NOW, "", session_id=terminal)
+        out = ar.render(ar.Radar(paused=[row("a", "acme"), row("b", "side"), row("c", "acme")]), "/p", NOW)
+        lines = out.splitlines()
+        start = next(i for i, line in enumerate(lines) if line.startswith("Paused (3)")) + 1
+        end = next(i for i in range(start, len(lines)) if lines[i] == "---" or not lines[i].startswith("--"))
+        labels = [line.split(" | ")[0] for line in lines[start:end]
+                  if line == "-----" or not line.startswith("----")]
+        self.assertEqual(labels, ["--Resume all 3", "-----", "--ACME  ·  2", "--a", "--c", "-----", "--SIDE  ·  1", "--b"])
+        self.assertIn('param1="resume-paused" param2="acme"', out)
 
     def test_pause_is_remembered_by_terminal(self):
         with tempfile.TemporaryDirectory() as folder:

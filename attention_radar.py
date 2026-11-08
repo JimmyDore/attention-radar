@@ -877,19 +877,28 @@ def _ignored_lines(ignored, rows, lost, plugin, now):
 
 
 def _paused_lines(rows, plugin):
-    """Sessions you paused: set aside like snoozed ones, not counted, one click from coming back."""
+    """Sessions you paused, by project: set aside like snoozed ones, not counted, one click from coming back."""
     if not rows:
         return []
     lines = ["---", f"{text('paused', count=len(rows))} | sfimage=pause.circle refresh=true {FLAGS}",
              f"--{text('resume_all', count=len(rows))} | sfimage=arrow.clockwise "
-             f"{_params(plugin, 'resume-paused')} refresh=true {FLAGS}", "-----"]
+             f"{_params(plugin, 'resume-paused')} refresh=true {FLAGS}"]
+    groups = {}
     for row in rows:
-        resume = _params(plugin, "resume", row.workspace_id, row.terminal_id, row.pane_id)
-        lines.append(f"--{_safe(row.label)}  ·  {_safe(row.project)} | {resume} refresh=true length=55 {FLAGS}")
-        lines.append(f"----{text('resume')} | sfimage=arrow.clockwise {resume} refresh=true {FLAGS}")
-        lines.append(f"----{text('open')} | sfimage=arrow.up.forward.app "
-                     f"{_params(plugin, 'open', row.workspace_id, row.pane_id)} refresh=false {FLAGS}")
-        lines.append(f"----{text('dismiss')} | sfimage=xmark {_params(plugin, 'dismiss', row.session_id)} refresh=true {FLAGS}")
+        groups.setdefault(row.project, []).append(row)
+    for project, members in groups.items():
+        # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
+        lines += ["-----", f"--{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY} refresh=true {FLAGS}",
+                  f"----{text('resume_all', count=len(members))} | sfimage=arrow.clockwise "
+                  f"{_params(plugin, 'resume-paused', project)} refresh=true {FLAGS}"]
+        for row in members:
+            resume = _params(plugin, "resume", row.workspace_id, row.terminal_id, row.pane_id)
+            lines.append(f"--{_safe(row.label)} | {resume} refresh=true length=55 {FLAGS}")
+            lines.append(f"----{text('resume')} | sfimage=arrow.clockwise {resume} refresh=true {FLAGS}")
+            lines.append(f"----{text('open')} | sfimage=arrow.up.forward.app "
+                         f"{_params(plugin, 'open', row.workspace_id, row.pane_id)} refresh=false {FLAGS}")
+            lines.append(f"----{text('dismiss')} | sfimage=xmark "
+                         f"{_params(plugin, 'dismiss', row.session_id)} refresh=true {FLAGS}")
     return lines
 
 
