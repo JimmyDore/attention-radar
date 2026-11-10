@@ -40,6 +40,7 @@ INTERRUPTED_DAYS = 7
 NEEDS = "needs"
 CHECK = "check"
 HIDDEN = "hidden"
+HANDED = "handed"  # a worker whose turn ended on a report: it waits on its orchestrator, not on you
 INTERRUPTED = "interrupted"
 
 
@@ -54,6 +55,7 @@ class Config:
     snooze_hours: List[int] = field(default_factory=lambda: [12, 18])
     ignore_projects: List[str] = field(default_factory=list)
     orchestrators_dir: str = ""
+    orchestrators_dirs: List[str] = field(default_factory=list)
     snooze_file: str = os.path.join(STATE_DIR, "snoozes.json")
     opened_file: str = os.path.join(STATE_DIR, "opened.json")
     focus_file: str = os.path.join(STATE_DIR, "focus.json")
@@ -75,6 +77,10 @@ class Config:
                 return path
         found = [shutil.which(name) for name in CLI_NAMES]
         return next((path for path in found if path), "paradev")
+
+    @property
+    def orchestrator_roots(self):
+        return [root for root in [self.orchestrators_dir, *self.orchestrators_dirs] if root]
 
 
 def load_config(path=None):
@@ -118,6 +124,8 @@ TEXTS = {
         "pause": "Pause (frees memory)",
         "pause_all": "Pause all {count}",
         "paused": "Paused ({count})",
+        "reports": "{count} report(s)",
+        "handed": "{count} waiting on the orchestrator",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
@@ -147,6 +155,8 @@ TEXTS = {
         "pause": "Mettre en pause (libère la mémoire)",
         "pause_all": "Tout mettre en pause ({count})",
         "paused": "En pause ({count})",
+        "reports": "{count} rapport(s)",
+        "handed": "{count} attendent l'orchestrator",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
@@ -178,6 +188,7 @@ class Transcript:
     wake_at: Optional[float] = None
     recurring_cron: bool = False
     asks: bool = False  # the turn ended on a question to you
+    handed_off: bool = False  # the last thing the session did was report to its orchestrator
 
 
 @dataclass
@@ -202,10 +213,12 @@ class Row:
     opened: bool = False
     agent: str = ""
     status: str = ""  # the Claude session's own status, empty when no session file matched
+    topic: str = ""  # the orchestrated topic this session belongs to
+    role: str = ""  # "orchestrator" or "worker" within that topic
 
     @property
     def pausable(self):
-        return self.verdict.bucket == NEEDS and self.status in PAUSABLE_STATUSES
+        return self.verdict.bucket in (NEEDS, HANDED) and self.status in PAUSABLE_STATUSES
 
 
 @dataclass
@@ -247,7 +260,7 @@ def parse_transcript(lines):
     info = Transcript()
     open_ids = set()
     crons = set()
-    asks = False
+    asks = handed = False
     for line in lines:
         try:
             entry = json.loads(line)
@@ -269,7 +282,8 @@ def parse_transcript(lines):
                 info.wake_at = result["nextFireAt"] / 1000
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
-            asks = asks and not (entry["type"] == "user" and isinstance(content, str) and content.strip())
+            if entry["type"] == "user" and isinstance(content, str) and content.strip():
+                asks = handed = False
             continue
         for block in content:
             kind = block.get("type") if isinstance(block, dict) else None
@@ -278,6 +292,7 @@ def parse_transcript(lines):
                 asks = asks_question(block["text"])
             elif kind == "tool_use" or (kind == "text" and entry["type"] == "user"):
                 asks = False
+                handed = kind == "tool_use" and hands_off(block)
             if kind == "tool_use" and block.get("name") == "CronDelete":
                 crons.discard((block.get("input") or {}).get("id"))
             elif kind == "tool_use" and block.get("name") in DIALOG_TOOLS:
@@ -289,7 +304,21 @@ def parse_transcript(lines):
     info.open_dialog = bool(open_ids)
     info.recurring_cron = bool(crons)
     info.asks = asks
+    info.handed_off = handed
     return info
+
+
+REPORT = re.compile(r"orch\.py\S*\s+report\s")
+REPORT_KIND = re.compile(r"--kind[= ]+[\"']?(\w+)")
+
+
+def hands_off(block):
+    """A report to an orchestrator (`orch.py report`), except `waiting`: that one points the orchestrator back at you."""
+    command = (block.get("input") or {}).get("command") if block.get("name") == "Bash" else None
+    if not isinstance(command, str) or not REPORT.search(command):
+        return False
+    kind = REPORT_KIND.search(command)
+    return not (kind and kind.group(1) == "waiting")
 
 
 def asks_question(content):
@@ -612,32 +641,42 @@ def interrupted_rows(snapshot, bindings, dismissed=()):
     return rows
 
 
-def load_orchestrators(root=None):
-    """Orchestrator terminal -> its worker workspaces and unread report count.
+def _workspace_in(path):
+    try:
+        with open(path) as handle:
+            return json.load(handle).get("workspace")
+    except (OSError, ValueError, AttributeError):
+        return None
 
-    Layout, one folder per topic: orchestrator.json {"terminal": ...}, workers/*.json {"workspace": ...},
-    inbox/*.json for reports the orchestrator has not read yet.
+
+def load_orchestrators(roots=None):
+    """Orchestrator terminal -> its topic, its worker workspaces and its unread report count.
+
+    Each root is a topic folder or holds one folder per topic. A topic folder has orchestrator.json
+    {"terminal": ...}, inbox/*.json for reports the orchestrator has not read yet, handled/*.json for
+    the ones it has, and optionally workers/*.json {"workspace": ...}. A worker is any workspace
+    listed in workers/ or named by a report.
     """
-    root = os.path.expanduser(root if root is not None else CONFIG.orchestrators_dir)
-    if not root:
-        return {}
+    roots = CONFIG.orchestrator_roots if roots is None else ([roots] if isinstance(roots, str) else roots)
     orchestrators = {}
-    for pointer in glob.glob(os.path.join(root, "*", "orchestrator.json")):
-        topic = os.path.dirname(pointer)
-        try:
-            with open(pointer) as handle:
-                terminal = json.load(handle)["terminal"]
-        except (OSError, ValueError, KeyError, TypeError):
-            continue
-        workers = set()
-        for path in glob.glob(os.path.join(topic, "workers", "*.json")):
+    for root in filter(None, map(os.path.expanduser, roots)):
+        pointers = glob.glob(os.path.join(root, "orchestrator.json")) + \
+            glob.glob(os.path.join(root, "*", "orchestrator.json"))
+        for pointer in pointers:
+            topic = os.path.dirname(pointer)
             try:
-                with open(path) as handle:
-                    workers.add(json.load(handle)["workspace"])
+                with open(pointer) as handle:
+                    data = json.load(handle)
+                terminal = data["terminal"]
             except (OSError, ValueError, KeyError, TypeError):
                 continue
-        inbox = len(glob.glob(os.path.join(topic, "inbox", "*.json")))
-        orchestrators[terminal] = {"workers": workers, "inbox": inbox}
+            inbox = glob.glob(os.path.join(topic, "inbox", "*.json"))
+            files = [*glob.glob(os.path.join(topic, "workers", "*.json")), *inbox,
+                     *glob.glob(os.path.join(topic, "handled", "*.json"))]
+            workers = {w for w in map(_workspace_in, files) if w} - {data.get("workspace")}
+            orchestrators[terminal] = {"topic": os.path.basename(topic), "workers": workers, "inbox": len(inbox)}
+            if data.get("workspace"):
+                orchestrators[terminal]["workspace"] = data["workspace"]
     return orchestrators
 
 
@@ -656,9 +695,8 @@ def running_workspaces(snapshot, sessions):
     return running
 
 
-def waits_on_worker(terminal_id, orchestrators, running):
+def waits_on_worker(orchestrator, running):
     """An orchestrator with no unread report whose worker is still running has nothing for you yet."""
-    orchestrator = orchestrators.get(terminal_id)
     return bool(orchestrator) and not orchestrator["inbox"] and bool(orchestrator["workers"] & running)
 
 
@@ -708,6 +746,17 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
     opened = opened or {}
     serving = serving or set()
     running = running_workspaces(snapshot, sessions) if orchestrators else set()
+    # Workspace and terminal ids holding a Claude, to tell whether an orchestrator is there to read a report.
+    live = {i for w in snapshot.get("workspaces", []) for t in w.get("terminals", []) if t.get("agent")
+            for i in (w["id"], t["id"])}
+    # The terminal in orchestrator.json goes stale when the session is resumed in a new one: the workspace doesn't.
+    orchestrating = {o["workspace"]: o for o in orchestrators.values() if o.get("workspace")}
+    # workspace -> (topic, whether its orchestrator is live to pick up a report)
+    topics = {}
+    for orch_terminal, orchestrator in orchestrators.items():
+        picked_up = orch_terminal in live or orchestrator.get("workspace") in live
+        for workspace_id in orchestrator["workers"]:
+            topics.setdefault(workspace_id, (orchestrator.get("topic") or "topic", picked_up))
     ignored = set(CONFIG.ignore_projects)
     agents = matched = 0
     seen_sessions = set()
@@ -736,8 +785,14 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 activity_at = max([t for t in (updated and updated / 1000, writes) if t], default=None)
             verdict = classify(agent.get("state"), status, transcript, terminal["id"] in failed, now, activity_at,
                                serving=bool(session) and session.get("pid") in serving)
-            if verdict.bucket == NEEDS and verdict.rank and waits_on_worker(terminal["id"], orchestrators, running):
+            orchestrator = orchestrators.get(terminal["id"]) or orchestrating.get(workspace["id"])
+            if verdict.bucket == NEEDS and verdict.rank and orchestrator and waits_on_worker(orchestrator, running):
                 verdict = Verdict(HIDDEN)
+            topic, picked_up = topics.get(workspace["id"], ("", False))
+            role = "orchestrator" if orchestrator else ("worker" if topic else "")
+            # Its turn ended on a report: the orchestrator answers it, or tells you to go there.
+            if role == "worker" and verdict.bucket == NEEDS and verdict.rank and picked_up and transcript.handed_off:
+                verdict = Verdict(HANDED)
             if verdict.bucket == HIDDEN:
                 continue
             name = workspace.get("name") or ""
@@ -754,6 +809,10 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), transcript.last_ts_raw, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
+            row.topic = (orchestrator.get("topic") or "topic") if orchestrator else topic
+            row.role = role
+            if orchestrator and orchestrator["inbox"]:
+                row.label += f"  ·  {text('reports', count=orchestrator['inbox'])}"
             row.status = status or ""
             row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
@@ -814,6 +873,7 @@ def _groups(rows, plugin, now, depth=0):
     p = "--" * depth
     needs = [r for r in rows if r.verdict.bucket == NEEDS]
     checks = [r for r in rows if r.verdict.bucket == CHECK]
+    handed = [r for r in rows if r.verdict.bucket == HANDED]
     groups, lines = {}, []
     # A row opened since its last message goes last: it is being answered, not waiting.
     for row in sorted(needs, key=lambda r: (r.opened, urgency(r, now), r.since or 0)):
@@ -828,13 +888,38 @@ def _groups(rows, plugin, now, depth=0):
         if pausable:
             lines.append(f"{p}--{text('pause_all', count=len(pausable))} | sfimage=pause.circle "
                          f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
-        for row in members:
-            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
+        lines += _project_lines(members, handed, plugin, now, depth)
     if checks:
         heading = text("check", minutes=CONFIG.stale_after_minutes)
         lines += [f"{p}---", f"{p}{heading} | size=11 color={GREY} {FLAGS}"]
         for row in checks:
             lines += _row_lines(row, plugin, now, "⏳", depth)
+    return lines
+
+
+def _project_lines(members, handed, plugin, now, depth=0):
+    """A project's rows: solo sessions first, then one block per orchestrated topic.
+
+    In a topic, the workers talking to you come before the orchestrator, and the workers that only
+    wait on the orchestrator fold into one submenu at the end."""
+    p = "--" * depth
+    lines, topics = [], {}
+    for row in members:
+        if row.topic:
+            topics.setdefault(row.topic, []).append(row)
+        else:
+            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
+    for topic, rows in topics.items():
+        lines.append(f"{p}{_safe(topic)} | size=11 color={GREY} {FLAGS}")
+        for row in sorted(rows, key=lambda r: r.role == "orchestrator"):
+            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
+        waiting = [r for r in handed if r.topic == topic and r.project == rows[0].project]
+        if waiting:
+            # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
+            lines.append(f"{p}{text('handed', count=len(waiting))} | sfimage=arrow.turn.down.right "
+                         f"color={GREY} refresh=true {FLAGS}")
+            for row in sorted(waiting, key=lambda r: r.since or 0):
+                lines += _row_lines(row, plugin, now, "·", depth + 1)
     return lines
 
 
@@ -1068,7 +1153,7 @@ def doctor():
     print(f"paradev cli      {CONFIG.cli}")
     print(f"claude dir       {CONFIG.claude}")
     print(f"host databases   {', '.join(host_db_paths()) or 'none found (failed turns will not show)'}")
-    print(f"orchestrators    {CONFIG.orchestrators_dir or 'off'}")
+    print(f"orchestrators    {', '.join(CONFIG.orchestrator_roots) or 'off'}")
     print(f"snooze file      {CONFIG.snooze_file}")
     try:
         snapshot = load_snapshot()

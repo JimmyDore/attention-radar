@@ -534,7 +534,121 @@ class Orchestrator(Base):
                 json.dump({"workspace": "ww", "terminal": "work"}, handle)
             with open(os.path.join(topic, "inbox", "1-done.json"), "w") as handle:
                 handle.write("{}")
-            self.assertEqual(ar.load_orchestrators(root), {"orch": {"workers": {"ww"}, "inbox": 1}})
+            self.assertEqual(ar.load_orchestrators(root),
+                             {"orch": {"topic": "billing", "workers": {"ww"}, "inbox": 1, "workspace": "wo"}})
+
+    def test_load_a_root_that_is_itself_the_topic_finds_workers_from_reports(self):
+        # The LPC layout: no workers/ folder, one topic per root.
+        with tempfile.TemporaryDirectory() as parent:
+            root = os.path.join(parent, "lpc-orchestrator")
+            for sub in ("inbox", "handled"):
+                os.makedirs(os.path.join(root, sub))
+            with open(os.path.join(root, "orchestrator.json"), "w") as handle:
+                json.dump({"workspace": "wo", "terminal": "orch"}, handle)
+            for folder, workspace in (("handled", "w-old"), ("handled", "wo"), ("inbox", "w-new")):
+                with open(os.path.join(root, folder, f"{workspace}.json"), "w") as handle:
+                    json.dump({"kind": "done", "workspace": workspace}, handle)
+            self.assertEqual(ar.load_orchestrators([root]),
+                             {"orch": {"topic": "lpc-orchestrator", "workers": {"w-old", "w-new"}, "inbox": 1, "workspace": "wo"}})
+
+
+def report_call(kind="done"):
+    command = f"python3 /x/topic-orchestrator/scripts/orch.py report --topic billing --ticket VIA-1 --kind {kind} --text hi"
+    return line("assistant", [{"type": "tool_use", "id": "r", "name": "Bash", "input": {"command": command}}])
+
+
+def tool_result(id_="r"):
+    return line("user", [{"type": "tool_result", "tool_use_id": id_, "content": "report saved"}])
+
+
+class HandOff(Base):
+    """A worker whose turn ended on a report waits on its orchestrator; anything after the report is for you."""
+
+    def parse(self, *lines):
+        return ar.parse_transcript(list(lines))
+
+    def test_report_then_closing_text_is_handed_off(self):
+        info = self.parse(report_call(), tool_result(), line("assistant", [{"type": "text", "text": "Reported."}]))
+        self.assertTrue(info.handed_off)
+
+    def test_work_after_the_report_is_not(self):
+        # VIA-1552, 2026-11-10: reported done, then ran pulumi-deploy and stopped on "reply with one" for Jimmy.
+        info = self.parse(
+            report_call(), tool_result(),
+            line("assistant", [{"type": "tool_use", "id": "s", "name": "Skill", "input": {"skill": "pulumi-deploy"}}]),
+            tool_result("s"),
+            line("assistant", [{"type": "text", "text": "Next steps (reply with one): 1. apply"}]),
+        )
+        self.assertFalse(info.handed_off)
+
+    def test_a_waiting_report_points_back_at_you(self):
+        self.assertFalse(self.parse(report_call("waiting"), tool_result()).handed_off)
+
+    def test_you_typing_after_the_report_ends_it(self):
+        self.assertFalse(self.parse(report_call(), tool_result(), line("user", "and the staging grants?")).handed_off)
+
+    def test_lpc_report_command_counts_too(self):
+        command = "python3 /r/.claude/skills/lpc-orchestrator/scripts/orch.py report --story LPC-15 --kind done --text x"
+        call = line("assistant", [{"type": "tool_use", "id": "r", "name": "Bash", "input": {"command": command}}])
+        self.assertTrue(self.parse(call, tool_result()).handed_off)
+
+    def snap(self):
+        return {"workspaces": [
+            {"id": "wo", "name": "orchestrator-billing", "project": "acme", "terminals": [term("orch")]},
+            {"id": "ww", "name": "ticket-42", "project": "acme", "terminals": [term("work")]},
+        ]}
+
+    def build(self, worker, orch_live=True, inbox=1):
+        snap = self.snap()
+        if not orch_live:
+            snap["workspaces"][0]["terminals"] = []
+        sessions = {"orch": {"status": "idle", "sessionId": "o"}, "work": {"status": "idle", "sessionId": "w"}}
+        orchestrators = {"orch": {"topic": "billing", "workers": {"ww"}, "inbox": inbox}}
+        return ar.build(snap, sessions, set(), {}, NOW, subagents=lambda s: None, orchestrators=orchestrators,
+                        read=lambda s: worker if s["sessionId"] == "w" else t(last_ts=NOW - 60))
+
+    def test_handed_off_worker_waits_on_the_orchestrator(self):
+        radar = self.build(t(last_ts=NOW - 60, handed_off=True))
+        verdicts = {r.terminal_id: r.verdict.bucket for r in radar.rows}
+        self.assertEqual(verdicts, {"orch": ar.NEEDS, "work": ar.HANDED})
+        self.assertEqual({r.terminal_id: (r.topic, r.role) for r in radar.rows},
+                         {"orch": ("billing", "orchestrator"), "work": ("billing", "worker")})
+
+    def test_worker_that_did_not_report_talks_to_you(self):
+        radar = self.build(t(last_ts=NOW - 60))
+        self.assertEqual({r.verdict.bucket for r in radar.rows}, {ar.NEEDS})
+
+    def test_a_dialog_beats_the_report(self):
+        radar = self.build(t(last_ts=NOW - 60, handed_off=True, open_dialog=True))
+        self.assertEqual(next(r for r in radar.rows if r.terminal_id == "work").verdict.bucket, ar.NEEDS)
+
+    def test_no_live_orchestrator_to_read_the_report_means_you(self):
+        radar = self.build(t(last_ts=NOW - 60, handed_off=True), orch_live=False)
+        self.assertEqual([r.verdict.bucket for r in radar.rows], [ar.NEEDS])
+
+    def test_orchestrator_label_shows_unread_reports(self):
+        radar = self.build(t(last_ts=NOW - 60), inbox=3)
+        self.assertEqual(next(r for r in radar.rows if r.role == "orchestrator").label,
+                         "orchestrator-billing  ·  3 report(s)")
+
+    def test_menu_puts_solo_first_then_the_topic_worker_before_orchestrator_and_folds_handed(self):
+        def row(label, terminal, since, topic="", role="", bucket=ar.NEEDS):
+            r = ar.Row("w", terminal, label, "acme", ar.Verdict(bucket), since, "", "a", topic=topic, role=role)
+            return r
+        rows = [row("orch", "o", NOW - 9000, "billing", "orchestrator"),
+                row("solo", "s", NOW - 60),
+                row("grill", "g", NOW - 600, "billing", "worker"),
+                row("done", "d", NOW - 60, "billing", "worker", ar.HANDED)]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW)
+        top = [l.split(" | ")[0] for l in out.splitlines() if not l.startswith("--")]
+        self.assertEqual(top[0], "3")
+        self.assertEqual(top[1:7], ["ACME  ·  3", "🟠  solo", "billing", "🟠  grill", "🟡  orch",
+                                    "1 waiting on the orchestrator"])
+        self.assertIn("--·  done", out)
+
+    def test_handed_workers_of_a_topic_with_nothing_for_you_stay_out(self):
+        rows = [ar.Row("w", "d", "done", "acme", ar.Verdict(ar.HANDED), NOW, "", "a", topic="billing", role="worker")]
+        self.assertIn("Inbox zero", ar.render(ar.Radar(rows=rows), "/p", NOW))
 
 
 class Render(Base):

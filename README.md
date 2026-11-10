@@ -23,6 +23,7 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | `ScheduleWakeup` or one-shot cron still to come | transcript | Hidden |
 | Recurring cron not deleted | transcript | Hidden |
 | Orchestrator whose worker is still running, with no unread report (opt-in, see below) | orchestrator records | Hidden |
+| Worker whose turn ended on a report to its orchestrator (opt-in, see below) | transcript, orchestrator records | Folded under the orchestrator, not counted |
 | Anything else | | Counted, oldest first |
 | Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
 | Session you paused | radar state + Paradev `host.db` | "Paused" submenu, not counted, with **Resume** |
@@ -96,24 +97,39 @@ Everything has a default. To change something, create `~/.config/attention-radar
 | `paradev_cli` | found automatically | Path to the `paradev` CLI |
 | `claude_dir` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | Where Claude Code keeps its sessions and transcripts |
 | `host_dbs` | `~/.paradev/host/*/host.db`, `~/.superset/host/*/host.db` | Paradev host databases, read for failed turns and interrupted sessions |
-| `orchestrators_dir` | off | See below |
+| `orchestrators_dirs` | `[]` | See below. `orchestrators_dir`, a single folder, still works |
 | `demo` | `false` | Show made-up sessions instead of yours, for screenshots |
 
 An unknown key or broken JSON shows `!` in the menu bar with the reason, so a typo can't fail silently.
 
 ### Orchestrators (optional)
 
-If one session dispatches work to sessions in other workspaces and waits for them, it shows as waiting for you while the workers run. Point `orchestrators_dir` at a folder that describes who reports to whom, and the radar hides the orchestrator while one of its workers is running and none of its reports is unread:
+Some sessions are orchestrators: they start workers in other workspaces, and the workers report back to them. Without help the radar shows them all side by side, and you can't tell which one to open first. List the folders that describe who reports to whom in `orchestrators_dirs`, and the radar groups each topic under its orchestrator:
 
 ```
-<orchestrators_dir>/
-  <topic>/
-    orchestrator.json     {"terminal": "<the orchestrator's Paradev terminal id>"}
-    workers/<any>.json    {"workspace": "<a worker's Paradev workspace id>"}
-    inbox/<any>.json      one file per report the orchestrator has not read yet
+ACME  ·  3
+🟠  fix-login                 a session of its own
+billing                       the topic
+🟠  ticket-42-grill           a worker talking to you: answer it there
+🟡  billing-orchestrator  ·  2 report(s)
+⤷  1 waiting on the orchestrator
 ```
 
-Your orchestration tooling writes these files. The radar only reads them.
+- A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It folds into "waiting on the orchestrator" and isn't counted. That holds only while the orchestrator's workspace has a live Claude to read the report.
+- A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It comes first in its topic and is counted. So does a `waiting` report, which points you at the worker's terminal.
+- The orchestrator shows how many reports it hasn't read. It is hidden while one of its workers runs and none of its reports is unread.
+
+Each folder is a topic or holds one folder per topic:
+
+```
+<topic>/
+  orchestrator.json     {"workspace": "<its Paradev workspace id>", "terminal": "<its terminal id>"}
+  inbox/<any>.json      a report the orchestrator hasn't read yet, with the worker's "workspace"
+  handled/<any>.json    a report it has read
+  workers/<any>.json    optional, {"workspace": "<a worker's Paradev workspace id>"}
+```
+
+A worker is any workspace listed in `workers/` or named by a report. The radar spots a report in a worker's transcript as a Bash command running `orch.py report`, and reads `--kind waiting` from it. Your orchestration tooling writes these files. The radar only reads them.
 
 ## Limits
 
