@@ -680,26 +680,6 @@ def load_orchestrators(roots=None):
     return orchestrators
 
 
-def running_workspaces(snapshot, sessions):
-    """Workspaces where at least one Claude is working: session busy or shell, or Paradev says working."""
-    running = set()
-    for workspace in snapshot.get("workspaces", []):
-        for terminal in workspace.get("terminals", []):
-            agent = terminal.get("agent")
-            if not agent:
-                continue
-            session = sessions.get(terminal["id"])
-            status = session.get("status") if session else None
-            if status in RUNNING_STATUSES or (status is None and agent.get("state") in ("working", "starting")):
-                running.add(workspace["id"])
-    return running
-
-
-def waits_on_worker(orchestrator, running):
-    """An orchestrator with no unread report whose worker is still running has nothing for you yet."""
-    return bool(orchestrator) and not orchestrator["inbox"] and bool(orchestrator["workers"] & running)
-
-
 def session_dir(session):
     cwd = re.sub(r"[^A-Za-z0-9]", "-", session.get("cwd", ""))
     return os.path.join(CONFIG.claude, "projects", cwd, session.get("sessionId", ""))
@@ -745,7 +725,6 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
     orchestrators = orchestrators or {}
     opened = opened or {}
     serving = serving or set()
-    running = running_workspaces(snapshot, sessions) if orchestrators else set()
     # Workspace and terminal ids holding a Claude, to tell whether an orchestrator is there to read a report.
     live = {i for w in snapshot.get("workspaces", []) for t in w.get("terminals", []) if t.get("agent")
             for i in (w["id"], t["id"])}
@@ -786,8 +765,6 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             verdict = classify(agent.get("state"), status, transcript, terminal["id"] in failed, now, activity_at,
                                serving=bool(session) and session.get("pid") in serving)
             orchestrator = orchestrators.get(terminal["id"]) or orchestrating.get(workspace["id"])
-            if verdict.bucket == NEEDS and verdict.rank and orchestrator and waits_on_worker(orchestrator, running):
-                verdict = Verdict(HIDDEN)
             topic, picked_up = topics.get(workspace["id"], ("", False))
             role = "orchestrator" if orchestrator else ("worker" if topic else "")
             # Its turn ended on a report: the orchestrator answers it, or tells you to go there.

@@ -493,7 +493,7 @@ class Pause(Base):
 
 
 class Orchestrator(Base):
-    """An orchestrator idle while its worker runs is not waiting on you."""
+    """An orchestrator whose turn is over waits on you, even while its workers run."""
 
     def snap(self, worker_state="working"):
         return {"workspaces": [
@@ -506,18 +506,18 @@ class Orchestrator(Base):
         orchestrators = {"orch": {"workers": {"ww"}, "inbox": inbox}}
         radar = ar.build(self.snap(worker_state), sessions, set(), {}, NOW,
                          read=lambda s: (s["sessionId"] == "o" and transcript)
-                         or t(last_ts=NOW - 60, last_text="Nothing is needed until then."),
+                         or t(last_ts=NOW - 60, last_text="The prod apply is yours."),
                          subagents=lambda s: None, orchestrators=orchestrators)
         return [r.terminal_id for r in radar.rows]
 
-    def test_hidden_while_a_worker_runs(self):
-        self.assertEqual(self.build("busy"), [])
-        self.assertEqual(self.build("shell"), [])
+    def test_counted_while_a_worker_runs(self):
+        self.assertEqual(self.build("busy"), ["orch"])
+        self.assertEqual(self.build("shell"), ["orch"])
 
     def test_counted_once_workers_are_idle(self):
         self.assertEqual(sorted(self.build("idle", worker_state="idle")), ["orch", "work"])
 
-    def test_unread_report_brings_it_back(self):
+    def test_unread_report_shows_on_its_row(self):
         self.assertEqual(self.build("busy", inbox=1), ["orch"])
 
     def test_open_dialog_still_shows(self):

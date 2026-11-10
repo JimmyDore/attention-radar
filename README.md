@@ -22,7 +22,6 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | Status `shell`, but the turn ended on a question, or every background shell is a server listening on a TCP port | transcript, `ps` and `lsof` | Counted: a dev server never ends, so the session is waiting for you |
 | `ScheduleWakeup` or one-shot cron still to come | transcript | Hidden |
 | Recurring cron not deleted | transcript | Hidden |
-| Orchestrator whose worker is still running, with no unread report (opt-in, see below) | orchestrator records | Hidden |
 | Worker whose turn ended on a report to its orchestrator (opt-in, see below) | transcript, orchestrator records | Folded under the orchestrator, not counted |
 | Anything else | | Counted, oldest first |
 | Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
@@ -117,7 +116,7 @@ billing                       the topic
 
 - A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It folds into "waiting on the orchestrator" and isn't counted. That holds only while the orchestrator's workspace has a live Claude to read the report.
 - A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It comes first in its topic and is counted. So does a `waiting` report, which points you at the worker's terminal.
-- The orchestrator shows how many reports it hasn't read. It is hidden while one of its workers runs and none of its reports is unread.
+- The orchestrator shows how many reports it hasn't read.
 
 Each folder is a topic or holds one folder per topic:
 
