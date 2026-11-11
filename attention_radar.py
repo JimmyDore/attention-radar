@@ -35,6 +35,9 @@ PLACEHOLDER_NAMES = {"local", "main"}
 RUNNING_STATUSES = {"busy", "shell"}
 # A session you can pause: its turn is over, so killing it loses nothing the transcript lacks.
 PAUSABLE_STATUSES = {"idle", "waiting", "shell"}
+# How a paused session's binding ends in host.db. Paradev resumes any pane on screen whose binding ended
+# "terminal-exited"; a reason it doesn't know keeps a paused pane dead until you resume it.
+PAUSED_REASON = "paused"
 INTERRUPTED_DAYS = 7
 
 NEEDS = "needs"
@@ -626,7 +629,7 @@ def interrupted_rows(snapshot, bindings, dismissed=()):
             latest[session_id] = binding
     rows = []
     for session_id, binding in latest.items():
-        killed = binding["end_reason"] == "terminal-exited" or (binding["ended_at"] is None and binding["terminal_id"] not in live)
+        killed = binding["end_reason"] in ("terminal-exited", PAUSED_REASON) or (binding["ended_at"] is None and binding["terminal_id"] not in live)
         if not killed or session_id in back or session_id in dismissed or binding["workspace_id"] not in workspaces:
             continue
         workspace = workspaces[binding["workspace_id"]]
@@ -1072,6 +1075,35 @@ def host_call(host, procedure, payload, timeout=60):
         return json.load(response)["result"]["data"]["json"]
 
 
+def _update_binding(terminal_id, sql, params):
+    """Run an update on the binding of this terminal, in the host database that has it."""
+    for path in host_db_paths():
+        try:
+            connection = sqlite3.connect(path, timeout=5)
+            try:
+                with connection:
+                    if connection.execute(sql, (*params, terminal_id)).rowcount:
+                        return True
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            continue
+    return False
+
+
+def hold_binding(terminal_id, now):
+    """End the binding as paused before the kill. Paradev only records how a binding ended once, so the
+    "terminal-exited" it writes when the terminal dies is dropped, and the pane, even on screen, stays put."""
+    return _update_binding(terminal_id, "update terminal_agent_bindings set ended_at = ?, end_reason = ?"
+                           " where ended_at is null and terminal_id = ?", (int(now * 1000), PAUSED_REASON))
+
+
+def release_binding(terminal_id):
+    """Make a paused session a resume candidate again, the only kind Paradev resumes."""
+    return _update_binding(terminal_id, "update terminal_agent_bindings set end_reason = 'terminal-exited'"
+                           " where end_reason = ? and terminal_id = ?", (PAUSED_REASON,))
+
+
 def resume(workspace_id, terminal_id):
     """Have Paradev resume the session the way it does when you look at the dead pane.
 
@@ -1082,6 +1114,7 @@ def resume(workspace_id, terminal_id):
     host = host_of(terminal_id)
     if not host:
         return False
+    release_binding(terminal_id)
     try:
         result = host_call(host, "terminalAgents.resume", {"workspaceId": workspace_id, "terminalId": terminal_id})
     except (OSError, ValueError, KeyError, TypeError):
@@ -1089,7 +1122,7 @@ def resume(workspace_id, terminal_id):
     return bool(result and result.get("resumed"))
 
 
-def pause(terminal_ids, sessions=None, table=None, kill=os.kill):
+def pause(terminal_ids, sessions=None, table=None, kill=os.kill, hold=None, now=None):
     """End these sessions' terminals the way a crash does, so they come back under Interrupted.
 
     Only a session whose turn is over: a running turn would lose what it has not written yet."""
@@ -1097,11 +1130,14 @@ def pause(terminal_ids, sessions=None, table=None, kill=os.kill):
     if table is None:
         table = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,comm="],
                                capture_output=True, text=True, timeout=5).stdout
+    hold = hold or hold_binding
+    now = time.time() if now is None else now
     paused = []
     for terminal_id in terminal_ids:
         session = sessions.get(terminal_id)
         if not session or not session.get("pid") or session.get("status") not in PAUSABLE_STATUSES:
             continue
+        hold(terminal_id, now)
         for pid in terminal_processes(int(session["pid"]), table):
             try:
                 kill(pid, signal.SIGKILL)  # no SessionEnd hook, which would tell Paradev it ended for good
@@ -1169,7 +1205,7 @@ def main(argv, plugin):
         open_workspace(argv[1], argv[3] if len(argv) > 3 else "")
         return 0
     if argv[:1] == ["pause"]:
-        save_paused(pause(argv[1:]), now)
+        save_paused(pause(argv[1:], now=now), now)
         return 0
     if argv[:1] == ["dismiss"] and len(argv) > 1:
         save_dismissed(argv[1], now)

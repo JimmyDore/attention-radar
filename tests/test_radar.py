@@ -444,6 +444,36 @@ class Pause(Base):
         count = ar.pause(["a", "b", "missing"], sessions, PS, kill=lambda pid, sig: killed.append(pid))
         self.assertEqual((count, killed), (["a"], [30, 31, 32, 20]))
 
+    def test_binding_is_held_before_the_kill(self):
+        order = []
+        ar.pause(["a"], {"a": {"pid": 30, "status": "idle"}}, PS, kill=lambda pid, sig: order.append(pid),
+                 hold=lambda terminal, now: order.append(terminal), now=NOW)
+        self.assertEqual(order[0], "a")
+
+    def test_held_binding_outlives_the_exit_and_comes_back_on_resume(self):
+        """Paradev resumes an on-screen pane whose binding ended "terminal-exited": a pause must not end so."""
+        import sqlite3
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "h"))
+            path = os.path.join(folder, "h", "host.db")
+            connection = sqlite3.connect(path)
+            connection.execute("create table terminal_agent_bindings (terminal_id text, ended_at integer, end_reason text)")
+            connection.execute("insert into terminal_agent_bindings values ('dead', null, null)")
+            connection.commit()
+            ar.configure(ar.Config(host_dbs=[os.path.join(folder, "*", "host.db")]))
+            self.assertTrue(ar.hold_binding("dead", NOW))
+            self.assertFalse(ar.hold_binding("dead", NOW + 1))  # Paradev's own end, after the kill, changes nothing
+            self.assertEqual(connection.execute("select ended_at, end_reason from terminal_agent_bindings").fetchone(),
+                             (int(NOW * 1000), "paused"))
+            self.assertTrue(ar.release_binding("dead"))
+            self.assertEqual(connection.execute("select end_reason from terminal_agent_bindings").fetchone(),
+                             ("terminal-exited",))
+            connection.close()
+
+    def test_held_binding_still_shows_as_interrupted(self):
+        rows = ar.interrupted_rows(snapshot(), [binding(ended=9, reason="paused")])
+        self.assertEqual([r.terminal_id for r in rows], ["dead"])
+
     def test_paused_sessions_wait_apart_and_do_not_count(self):
         radar = ar.build(snapshot(), {}, set(), {}, NOW, read=lambda s: t(), subagents=lambda s: None,
                          bindings=[binding(), binding("other", session="s2", ended=9, reason="terminal-exited")],
