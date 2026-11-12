@@ -33,6 +33,9 @@ EXCERPT_CHARS = 90
 DIALOG_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 PLACEHOLDER_NAMES = {"local", "main"}
 RUNNING_STATUSES = {"busy", "shell"}
+# Labels a topic session writes in its status file: the first ones want you, the last ones don't.
+WANTS_YOU = {"decisions", "approve", "question", "review"}
+WANTS_NOTHING = {"working", "quiet"}
 # A session you can pause: its turn is over, so killing it loses nothing the transcript lacks.
 PAUSABLE_STATUSES = {"idle", "waiting", "shell"}
 # How a paused session's binding ends in host.db. Paradev resumes any pane on screen whose binding ended
@@ -59,6 +62,7 @@ class Config:
     ignore_projects: List[str] = field(default_factory=list)
     orchestrators_dir: str = ""
     orchestrators_dirs: List[str] = field(default_factory=list)
+    status_dirs: List[str] = field(default_factory=lambda: ["~/.cache/topic-orchestrator/*/status"])
     snooze_file: str = os.path.join(STATE_DIR, "snoozes.json")
     opened_file: str = os.path.join(STATE_DIR, "opened.json")
     focus_file: str = os.path.join(STATE_DIR, "focus.json")
@@ -194,6 +198,8 @@ class Transcript:
     wake_at: Optional[float] = None
     recurring_cron: bool = False
     asks: bool = False  # the turn ended on a question to you
+    turn_start: Optional[float] = None  # when the last prompt (yours, a tick, a cron) arrived
+    dialog_count: int = 0  # questions in the open AskUserQuestion, 0 for a plan to approve
     handed_off: bool = False  # the last thing the session did was report to its orchestrator
 
 
@@ -221,6 +227,12 @@ class Row:
     status: str = ""  # the Claude session's own status, empty when no session file matched
     topic: str = ""  # the orchestrated topic this session belongs to
     role: str = ""  # "orchestrator" or "worker" within that topic
+    reason: str = ""  # what it wants from you: "decisions 5", "approve", "question", "review"…
+    hint: str = ""  # the first question or next step, shown on hover
+
+    @property
+    def title(self):
+        return f"{self.reason}  ·  {self.label}" if self.reason else self.label
 
     @property
     def pausable(self):
@@ -290,7 +302,10 @@ def parse_transcript(lines):
         if not isinstance(content, list):
             if entry["type"] == "user" and isinstance(content, str) and content.strip():
                 asks = handed = False
+                info.turn_start = info.last_ts
             continue
+        if entry["type"] == "user" and any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+            info.turn_start = info.last_ts
         for block in content:
             kind = block.get("type") if isinstance(block, dict) else None
             if kind == "text" and entry["type"] == "assistant" and block.get("text", "").strip():
@@ -304,6 +319,7 @@ def parse_transcript(lines):
             elif kind == "tool_use" and block.get("name") in DIALOG_TOOLS:
                 open_ids.add(block.get("id"))
                 questions = (block.get("input") or {}).get("questions") or [{}]
+                info.dialog_count = len(questions) if block.get("name") == "AskUserQuestion" else 0
                 info.dialog_text = questions[0].get("question", "") if isinstance(questions[0], dict) else ""
             elif kind == "tool_result":
                 open_ids.discard(block.get("tool_use_id"))
@@ -325,6 +341,47 @@ def hands_off(block):
         return False
     kind = REPORT_KIND.search(command)
     return not (kind and kind.group(1) == "waiting")
+
+
+Q_MARK = re.compile(r"(?:❓\s*\**|\*\*)Q(\d+)\b")
+NUMBERED_QUESTION = re.compile(r"^\s*\**(\d+)[.)]\s.*\?\W*$", re.M)
+CLOSING_APPROVAL = re.compile(r"\bapprove\b|\b(go|apply|merge|ship|send|deploy|run)\b[^?\n]*\?\W*$", re.I)
+ARTIFACT_LINK = re.compile(r"claude\.ai/(?:code/)?artifact/")
+
+
+def infer_reason(text_):
+    """What a turn that ended without a status file wants: numbered questions are decisions,
+    a closing go/apply asks for approval, a published artifact asks for a review."""
+    numbers = {m.group(1) for m in Q_MARK.finditer(text_)} or set(NUMBERED_QUESTION.findall(text_))
+    if numbers:
+        return f"decisions {len(numbers)}"
+    paragraphs = [p for p in re.split(r"\n\s*\n", text_) if p.strip()]
+    if paragraphs and CLOSING_APPROVAL.search(paragraphs[-1].strip()):
+        return "approve"
+    if ARTIFACT_LINK.search(text_):
+        return "review"
+    return "question"
+
+
+def status_reason(status):
+    count = status.get("count")
+    return f"{status['label']} {count}" if isinstance(count, int) and count > 0 else status["label"]
+
+
+def load_statuses(patterns=None):
+    """Status files topic sessions write each turn, by terminal id and by workspace id (the file name)."""
+    statuses = {}
+    patterns = CONFIG.status_dirs if patterns is None else patterns
+    for pattern in patterns:
+        for path in glob.glob(os.path.join(os.path.expanduser(pattern), "*.json")):
+            data = _load_json(path)
+            if not isinstance(data, dict) or not data.get("label"):
+                continue
+            workspace = os.path.splitext(os.path.basename(path))[0]
+            for key in (workspace, data.get("terminal")):
+                if key and data.get("at", 0) >= statuses.get(key, {}).get("at", 0):
+                    statuses[key] = data
+    return statuses
 
 
 def asks_question(content):
@@ -733,13 +790,15 @@ def pane_ids(workspace):
 
 
 def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subagents=newest_subagent_write,
-          orchestrators=None, opened=None, bindings=None, dismissed=None, serving=None, paused=None):
+          orchestrators=None, opened=None, bindings=None, dismissed=None, serving=None, paused=None,
+          statuses=None):
     radar = Radar()
     for row in interrupted_rows(snapshot, bindings or [], dismissed or {}):
         (radar.paused if row.terminal_id in (paused or {}) else radar.interrupted).append(row)
     orchestrators = orchestrators or {}
     opened = opened or {}
     serving = serving or set()
+    statuses = statuses or {}
     # Workspace and terminal ids holding a Claude, to tell whether an orchestrator is there to read a report.
     live = {i for w in snapshot.get("workspaces", []) for t in w.get("terminals", []) if t.get("agent")
             for i in (w["id"], t["id"])}
@@ -771,13 +830,13 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 continue
             seen_sessions.add(session_id)
             transcript = read(session) if session else Transcript()
-            status = session.get("status") if session else None
+            session_status = session.get("status") if session else None
             activity_at = None
-            if status in RUNNING_STATUSES:
+            if session_status in RUNNING_STATUSES:
                 updated = session.get("statusUpdatedAt")
                 writes = subagents(session)
                 activity_at = max([t for t in (updated and updated / 1000, writes) if t], default=None)
-            verdict = classify(agent.get("state"), status, transcript, terminal["id"] in failed, now, activity_at,
+            verdict = classify(agent.get("state"), session_status, transcript, terminal["id"] in failed, now, activity_at,
                                serving=bool(session) and session.get("pid") in serving)
             orchestrator = orchestrators.get(terminal["id"]) or orchestrating.get(workspace["id"])
             topic, picked_up = topics.get(workspace["id"], ("", False))
@@ -785,6 +844,14 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             # Its turn ended on a report: the orchestrator answers it, or tells you to go there.
             if role == "worker" and verdict.bucket == NEEDS and verdict.rank and picked_up and transcript.handed_off:
                 verdict = Verdict(HANDED)
+            # The session's own word for this turn, if it wrote one since the prompt that started it.
+            status = statuses.get(terminal["id"]) or statuses.get(workspace["id"])
+            turn = transcript.turn_start or ((transcript.last_ts or 0) - 300)
+            if status and status.get("at", 0) < turn:
+                status = None
+            # A tick that ended on "nothing for you": not waiting, unless a dialog or a failure says otherwise.
+            if status and status["label"] in WANTS_NOTHING and verdict.bucket == NEEDS and verdict.rank:
+                continue
             if verdict.bucket == HIDDEN:
                 continue
             name = workspace.get("name") or ""
@@ -807,7 +874,18 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 row.label += f"  ·  {text('reports', count=orchestrator['inbox'])}"
             elif role == "worker" and verdict.bucket == NEEDS:
                 row.label += f"  ·  ↳ {topic}"
-            row.status = status or ""
+            row.status = session.get("status", "") if session else ""
+            if verdict.bucket == NEEDS:
+                if verdict.kind == "failed":
+                    row.reason = "failed"
+                elif status and status["label"] in WANTS_YOU:
+                    row.reason, row.hint = status_reason(status), status.get("next") or ""
+                elif transcript.open_dialog:
+                    row.reason = f"decisions {transcript.dialog_count}" if transcript.dialog_count else "approve"
+                    row.hint = transcript.dialog_text
+                else:
+                    row.reason = infer_reason(transcript.last_text)
+                row.hint = row.hint or row.excerpt
             row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
@@ -863,10 +941,11 @@ def next_row(rows, last_project=None):
 def _next_lines(row, plugin):
     if not row:
         return []
-    label = f"{row.label}  ·  {row.project}" if row.project else row.label
+    label = f"{row.title}  ·  {row.project}" if row.project else row.title
     opener = _opener(row, plugin)
-    return [f"{text('next', label=_safe(label))} | {opener} refresh=true length=60 {FLAGS}",
+    return [f"{text('next', label=_safe(label))} | {opener} refresh=true length=70 {FLAGS}",
             f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}",
+            *([f"--{_safe(row.hint)} | size=11 color={GREY} length=90 {FLAGS}"] if row.hint else []),
             f"--{text('skip')} | sfimage=forward {_skip(row, plugin)} refresh=true {FLAGS}",
             "---"]
 
@@ -878,8 +957,10 @@ def _row_lines(row, plugin, now, mark, depth=0):
     opener = _opener(row, plugin)
     # SwiftBar 2.1 drops the submenu routing of an action-less row when it patches the menu in
     # place, which greys the row out. An action on the row itself keeps it enabled.
-    lines = [f"{p}{mark}  {_safe(row.label)} | {opener} refresh=true length=55 {FLAGS}"]
+    lines = [f"{p}{mark}  {_safe(row.title)} | {opener} refresh=true length=60 {FLAGS}"]
     lines.append(f"{p}--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}")
+    if row.hint:
+        lines.append(f"{p}--{_safe(row.hint)} | size=11 color={GREY} length=90 {FLAGS}")
     if row.verdict.bucket == NEEDS:
         lines.append(f"{p}--{text('skip')} | sfimage=forward {_skip(row, plugin)} refresh=true {FLAGS}")
         lines.append(f"{p}--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
@@ -1264,7 +1345,7 @@ def main(argv, plugin):
         radar = build(load_snapshot(), sessions, load_failed_terminals(), load_snoozes(), now,
                       orchestrators=load_orchestrators(), opened=load_opened(),
                       bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions),
-                      paused=load_paused())
+                      paused=load_paused(), statuses=load_statuses())
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0

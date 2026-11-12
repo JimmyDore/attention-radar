@@ -690,6 +690,63 @@ class HandOff(Base):
         self.assertIn("Inbox zero", ar.render(ar.Radar(rows=rows), "/p", NOW))
 
 
+class Reason(Base):
+    def snap(self):
+        return {"workspaces": [{"id": "w1", "name": "ticket", "project": "acme", "terminals": [term("t1")]}]}
+
+    def build(self, transcript, status=None, session_status="idle"):
+        statuses = {"t1": status} if status else {}
+        return ar.build(self.snap(), {"t1": {"status": session_status, "sessionId": "s"}}, set(), {}, NOW,
+                        read=lambda s: transcript, subagents=lambda s: None, statuses=statuses)
+
+    def test_infer_from_the_last_message(self):
+        self.assertEqual(ar.infer_reason("❓ **Q1** - **A**: x?\n\n❓ **Q2** - **B**: y?"), "decisions 2")
+        self.assertEqual(ar.infer_reason("Questions :\n1. Lequel ?\n2. Quand ?\n3. Où ?"), "decisions 3")
+        self.assertEqual(ar.infer_reason("Done.\n\n1. Merged.\n2. Deployed."), "question")
+        self.assertEqual(ar.infer_reason("The migration is ready.\n\n**Go to run it on staging?**"), "approve")
+        self.assertEqual(ar.infer_reason("Page: https://claude.ai/code/artifact/abc"), "review")
+        self.assertEqual(ar.infer_reason("Which one do you prefer?"), "question")
+
+    def test_status_written_this_turn_wins(self):
+        status = {"label": "decisions", "count": 5, "next": "grill round 1", "at": NOW - 30}
+        row = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100, last_text="ok?"), status).rows[0]
+        self.assertEqual((row.reason, row.hint, row.title), ("decisions 5", "grill round 1", "decisions 5  ·  ticket"))
+
+    def test_status_from_an_earlier_turn_is_ignored(self):
+        status = {"label": "quiet", "at": NOW - 500}
+        row = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100, last_text="Go to merge?"), status).rows[0]
+        self.assertEqual(row.reason, "approve")
+
+    def test_quiet_or_working_this_turn_is_not_waiting(self):
+        for label in ("quiet", "working"):
+            radar = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100), {"label": label, "at": NOW - 30})
+            self.assertEqual(radar.rows, [])
+
+    def test_a_dialog_still_shows_despite_quiet(self):
+        radar = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100, open_dialog=True, dialog_count=3,
+                             dialog_text="Which?"), {"label": "quiet", "at": NOW - 30})
+        self.assertEqual((radar.rows[0].reason, radar.rows[0].hint), ("decisions 3", "Which?"))
+
+    def test_turn_start_is_the_last_prompt_not_a_tool_result(self):
+        info = ar.parse_transcript([
+            line("user", "/topic-orchestrator tick", ts="2026-11-05T10:00:00.000Z"),
+            line("assistant", [{"type": "tool_use", "id": "x", "name": "Bash", "input": {}}], ts="2026-11-05T10:00:05.000Z"),
+            line("user", [{"type": "tool_result", "tool_use_id": "x"}], ts="2026-11-05T10:00:09.000Z"),
+            line("assistant", [{"type": "text", "text": "tick: nothing for you"}], ts="2026-11-05T10:00:10.000Z"),
+        ])
+        self.assertEqual(info.turn_start, ar._parse_iso("2026-11-05T10:00:00.000Z"))
+
+    def test_load_statuses_by_terminal_and_workspace(self):
+        with tempfile.TemporaryDirectory() as root:
+            folder = os.path.join(root, "billing", "status")
+            os.makedirs(folder)
+            with open(os.path.join(folder, "ws-1.json"), "w") as handle:
+                json.dump({"label": "approve", "at": 5, "terminal": "term-1"}, handle)
+            statuses = ar.load_statuses([os.path.join(root, "*", "status")])
+            self.assertEqual(set(statuses), {"ws-1", "term-1"})
+            self.assertEqual(ar.status_reason({"label": "decisions", "count": 0}), "decisions")
+
+
 class Render(Base):
     def row(self, bucket=ar.NEEDS, project="acme", since=NOW - 7200, kind="", rank=1, label="feature-1"):
         return ar.Row("w1", "t1", label, project, ar.Verdict(bucket, rank, kind), since, "end", "r", pane_id="p1")

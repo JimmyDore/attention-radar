@@ -23,9 +23,12 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | `ScheduleWakeup` or one-shot cron still to come | transcript | Hidden |
 | Recurring cron not deleted | transcript | Hidden |
 | Worker whose turn ended on a report to its orchestrator (opt-in, see below) | transcript, orchestrator records | Hidden, counted in the orchestrator's reports |
+| Topic session whose status file for this turn says `quiet` or `working` | status file | Hidden: an orchestrator tick that found nothing for you |
 | Anything else | | Counted, oldest first in its project |
 | Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
 | Session you paused | radar state + Paradev `host.db` | "Paused" submenu, not counted, with **Resume** |
+
+Each row starts with what the session wants from you: `decisions N`, `approve`, `question`, `review` or `failed`, and hovering it shows the first question or next step. A topic session's status file (see below) says it outright. For any other session the radar reads the last message: numbered questions (`❓ **Q1**`, or `1.` lines ending on a question mark) are decisions, a closing "go…?" or "approve" asks for approval, a published artifact link asks for a review, and anything else is a question.
 
 Rows are grouped by project. The dot shows how long a session has been waiting: 🟠 under 1 h, 🟡 1 to 24 h, ⚪ over 24 h (probably finished: delete the workspace).
 
@@ -99,6 +102,7 @@ Everything has a default. To change something, create `~/.config/attention-radar
 | `claude_dir` | `$CLAUDE_CONFIG_DIR` or `~/.claude` | Where Claude Code keeps its sessions and transcripts |
 | `host_dbs` | `~/.paradev/host/*/host.db`, `~/.superset/host/*/host.db` | Paradev host databases, read for failed turns and interrupted sessions |
 | `orchestrators_dirs` | `[]` | See below. `orchestrators_dir`, a single folder, still works |
+| `status_dirs` | `["~/.cache/topic-orchestrator/*/status"]` | Folders of topic status files, see below |
 | `demo` | `false` | Show made-up sessions instead of yours, for screenshots |
 
 An unknown key or broken JSON shows `!` in the menu bar with the reason, so a typo can't fail silently.
@@ -117,6 +121,7 @@ ACME  ·  3
 - A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It leaves the menu and isn't counted: its report shows on the orchestrator's row. That holds only while the orchestrator's workspace has a live Claude to read the report.
 - A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It shows as an ordinary row, named after its topic, and is counted. So does a `waiting` report, which points you at the worker's terminal.
 - The orchestrator shows how many reports it hasn't read.
+- Topic sessions also write `~/.cache/topic-orchestrator/<topic>/status/<workspace id>.json` each turn: `{"label", "count", "next", "at", "terminal", …}`. A status written since the turn's prompt gives the row its label and hover text, and `quiet` or `working` keeps the session out of the count. Set the folders with `status_dirs`.
 
 Each folder is a topic or holds one folder per topic:
 

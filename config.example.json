@@ -8,5 +8,6 @@
   "claude_dir": "",
   "host_dbs": ["~/.paradev/host/*/host.db", "~/.superset/host/*/host.db"],
   "orchestrators_dirs": [],
+  "status_dirs": ["~/.cache/topic-orchestrator/*/status"],
   "demo": false
 }
