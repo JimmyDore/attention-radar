@@ -22,8 +22,8 @@ A Claude Code session running in a Paradev terminal counts unless something is s
 | Status `shell`, but the turn ended on a question, or every background shell is a server listening on a TCP port | transcript, `ps` and `lsof` | Counted: a dev server never ends, so the session is waiting for you |
 | `ScheduleWakeup` or one-shot cron still to come | transcript | Hidden |
 | Recurring cron not deleted | transcript | Hidden |
-| Worker whose turn ended on a report to its orchestrator (opt-in, see below) | transcript, orchestrator records | Folded under the orchestrator, not counted |
-| Anything else | | Counted, oldest first |
+| Worker whose turn ended on a report to its orchestrator (opt-in, see below) | transcript, orchestrator records | Hidden, counted in the orchestrator's reports |
+| Anything else | | Counted, oldest first in its project |
 | Terminal gone but the session never closed (shutdown, crash) | Paradev `host.db` | ↻ "Interrupted" at the top, counted, with **Resume** |
 | Session you paused | radar state + Paradev `host.db` | "Paused" submenu, not counted, with **Resume** |
 
@@ -35,6 +35,8 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 
 ## Using it
 
+- **→ Next** at the top of the menu says where to go now: the oldest session waiting in the project you last opened one in, so you finish a project before switching, else the oldest anywhere (in the focused project, if there is one). A dialog or a failed turn comes first. Click it to open that session; the next one takes its place.
+- Hover a row (or Next), then **Skip, come back later**: the row goes to the end of its group, out of Next, until the session writes again. Nothing opens.
 - Hover a row to open its workspace or snooze it.
 - Click a row to open its workspace in Paradev, on the right pane.
 - A row you opened moves to the end of its group until the session writes again, so you don't open it twice while the radar catches up.
@@ -103,19 +105,17 @@ An unknown key or broken JSON shows `!` in the menu bar with the reason, so a ty
 
 ### Orchestrators (optional)
 
-Some sessions are orchestrators: they start workers in other workspaces, and the workers report back to them. Without help the radar shows them all side by side, and you can't tell which one to open first. List the folders that describe who reports to whom in `orchestrators_dirs`, and the radar groups each topic under its orchestrator:
+Some sessions are orchestrators: they start workers in other workspaces, and the workers report back to them. Without help the radar shows them all side by side, the workers that only wait on their orchestrator included. List the folders that describe who reports to whom in `orchestrators_dirs`, and the radar keeps one row per orchestrator plus the workers that really wait on you:
 
 ```
 ACME  ·  3
-🟠  fix-login                 a session of its own
-billing                       the topic
-🟠  ticket-42-grill           a worker talking to you: answer it there
 🟡  billing-orchestrator  ·  2 report(s)
-⤷  1 waiting on the orchestrator
+🟠  ticket-42-grill  ·  ↳ billing     a worker talking to you: answer it there
+🟠  fix-login                         a session of its own
 ```
 
-- A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It folds into "waiting on the orchestrator" and isn't counted. That holds only while the orchestrator's workspace has a live Claude to read the report.
-- A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It comes first in its topic and is counted. So does a `waiting` report, which points you at the worker's terminal.
+- A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It leaves the menu and isn't counted: its report shows on the orchestrator's row. That holds only while the orchestrator's workspace has a live Claude to read the report.
+- A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It shows as an ordinary row, named after its topic, and is counted. So does a `waiting` report, which points you at the worker's terminal.
 - The orchestrator shows how many reports it hasn't read.
 
 Each folder is a topic or holds one folder per topic:
@@ -138,7 +138,7 @@ A worker is any workspace listed in `workers/` or named by a report. The radar s
 
 ## Privacy
 
-The radar runs locally and makes no network calls, apart from Resume asking Paradev's host service on `127.0.0.1`. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files, the end of each transcript, and the process list and listening ports (`ps`, `lsof`) when a session has a background shell. It writes only its own state files (snoozes, opened rows, focus, paused sessions), starts a Claude only when you click Resume, and stops one only when you click Pause.
+The radar runs locally and makes no network calls, apart from Resume asking Paradev's host service on `127.0.0.1`. It reads the Paradev CLI's snapshot, Paradev's host database, Claude Code's session files, the end of each transcript, and the process list and listening ports (`ps`, `lsof`) when a session has a background shell. It writes only its own state files (snoozes, opened rows, last opened project, focus, paused sessions), starts a Claude only when you click Resume, and stops one only when you click Pause.
 
 ## Development
 

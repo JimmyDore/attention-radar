@@ -206,6 +206,13 @@ class Snooze(Base):
             ar.save_ignored("acme", None, NOW, path)
             self.assertEqual(ar.load_ignored(NOW, path), {"side": NOW + 60})
 
+    def test_last_project_is_remembered(self):
+        with tempfile.TemporaryDirectory() as root:
+            path = os.path.join(root, "last.json")
+            self.assertIsNone(ar.load_last_project(path))
+            ar.save_last_project("acme", NOW, path)
+            self.assertEqual(ar.load_last_project(path), "acme")
+
     def test_opened_is_remembered_for_a_day(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "sub", "o.json")
@@ -661,10 +668,13 @@ class HandOff(Base):
         self.assertEqual(next(r for r in radar.rows if r.role == "orchestrator").label,
                          "orchestrator-billing  ·  3 report(s)")
 
-    def test_menu_puts_solo_first_then_the_topic_worker_before_orchestrator_and_folds_handed(self):
+    def test_worker_talking_to_you_names_its_topic(self):
+        radar = self.build(t(last_ts=NOW - 60))
+        self.assertEqual(next(r for r in radar.rows if r.role == "worker").label, "ticket-42  ·  ↳ billing")
+
+    def test_menu_is_flat_oldest_first_and_handed_workers_stay_out(self):
         def row(label, terminal, since, topic="", role="", bucket=ar.NEEDS):
-            r = ar.Row("w", terminal, label, "acme", ar.Verdict(bucket), since, "", "a", topic=topic, role=role)
-            return r
+            return ar.Row("w", terminal, label, "acme", ar.Verdict(bucket), since, "", "a", topic=topic, role=role)
         rows = [row("orch", "o", NOW - 9000, "billing", "orchestrator"),
                 row("solo", "s", NOW - 60),
                 row("grill", "g", NOW - 600, "billing", "worker"),
@@ -672,9 +682,8 @@ class HandOff(Base):
         out = ar.render(ar.Radar(rows=rows), "/p", NOW)
         top = [l.split(" | ")[0] for l in out.splitlines() if not l.startswith("--")]
         self.assertEqual(top[0], "3")
-        self.assertEqual(top[1:7], ["ACME  ·  3", "🟠  solo", "billing", "🟠  grill", "🟡  orch",
-                                    "1 waiting on the orchestrator"])
-        self.assertIn("--·  done", out)
+        self.assertEqual(top[2:6], ["ACME  ·  3", "🟡  orch", "🟠  grill", "🟠  solo"])
+        self.assertNotIn("done", out)
 
     def test_handed_workers_of_a_topic_with_nothing_for_you_stay_out(self):
         rows = [ar.Row("w", "d", "done", "acme", ar.Verdict(ar.HANDED), NOW, "", "a", topic="billing", role="worker")]
@@ -706,7 +715,7 @@ class Render(Base):
                 self.row(project="acme", since=NOW - 7200, label="b"),
                 self.row(project="acme", kind="dialog", rank=0, label="c")]
         top = self.top_level(ar.render(ar.Radar(rows=rows), "/p", NOW))
-        self.assertEqual(top[1:6], ["ACME  ·  2", "🔴  c", "🟡  b", "SIDE  ·  1", "🟠  a"])
+        self.assertEqual(top[1:7], ["→  Next: c  ·  acme", "ACME  ·  2", "🔴  c", "🟡  b", "SIDE  ·  1", "🟠  a"])
 
     def test_row_title_does_not_tick_with_time(self):
         first = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW)
@@ -732,7 +741,36 @@ class Render(Base):
         rows = [self.row(since=NOW - 600, label="a"), self.row(since=NOW - 7200, label="b")]
         rows[0].opened = True
         top = self.top_level(ar.render(ar.Radar(rows=rows), "/p", NOW))
-        self.assertEqual(top[2:4], ["🟡  b", "🟠  a"])
+        self.assertEqual(top[3:5], ["🟡  b", "🟠  a"])
+
+    def test_next_is_the_oldest_with_dialogs_first(self):
+        rows = [self.row(since=NOW - 600, label="a"), self.row(since=NOW - 7200, label="b"),
+                self.row(since=NOW - 60, label="c", kind="dialog", rank=0)]
+        self.assertEqual(ar.next_row(rows).label, "c")
+        self.assertEqual(ar.next_row(rows[:2]).label, "b")
+
+    def test_next_stays_in_the_last_project_while_it_has_something(self):
+        rows = [self.row(project="acme", since=NOW - 7200, label="a"),
+                self.row(project="side", since=NOW - 600, label="b")]
+        self.assertEqual(ar.next_row(rows, "side").label, "b")
+        rows[1].opened = True
+        self.assertEqual(ar.next_row(rows, "side").label, "a")
+
+    def test_next_skips_opened_check_and_handed_rows(self):
+        rows = [self.row(ar.CHECK, label="a"), self.row(ar.HANDED, label="b"), self.row(label="c")]
+        rows[2].opened = True
+        self.assertIsNone(ar.next_row(rows))
+        self.assertNotIn("Next:", ar.render(ar.Radar(rows=rows), "/p", NOW))
+
+    def test_next_follows_focus(self):
+        rows = [self.row(project="acme", since=NOW - 7200, label="a"), self.row(project="side", label="b")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW, {"project": "side", "until": NOW + 3600}, last_project="acme")
+        self.assertIn("→  Next: b  ·  side", out)
+
+    def test_next_opens_skips_and_remembers_the_project(self):
+        out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines()
+        self.assertIn('param1="open" param2="w1" param3="p1" param4="t1" param5="r" param6="acme"', out[2])
+        self.assertTrue(any('param1="skip" param2="t1" param3="r"' in l for l in out if l.startswith("--")))
 
     def test_urgency_by_age(self):
         marks = [ar.MARKS[ar.urgency(self.row(since=NOW - age), NOW)] for age in (60, 7200, 90000)]

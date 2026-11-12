@@ -65,6 +65,7 @@ class Config:
     ignored_file: str = os.path.join(STATE_DIR, "ignored.json")
     dismissed_file: str = os.path.join(STATE_DIR, "dismissed.json")
     paused_file: str = os.path.join(STATE_DIR, "paused.json")
+    last_project_file: str = os.path.join(STATE_DIR, "last_project.json")
     demo: bool = False
 
     @property
@@ -128,7 +129,8 @@ TEXTS = {
         "pause_all": "Pause all {count}",
         "paused": "Paused ({count})",
         "reports": "{count} report(s)",
-        "handed": "{count} waiting on the orchestrator",
+        "next": "→  Next: {label}",
+        "skip": "Skip, come back later",
         "no_match": "No Claude session matched a terminal: did an internal format change?",
         "broken": "Radar broken: {error}",
         "snapshot_failed": "paradev snapshot failed",
@@ -159,7 +161,8 @@ TEXTS = {
         "pause_all": "Tout mettre en pause ({count})",
         "paused": "En pause ({count})",
         "reports": "{count} rapport(s)",
-        "handed": "{count} attendent l'orchestrator",
+        "next": "→  Suivant : {label}",
+        "skip": "Passer, j'y reviens après",
         "no_match": "Aucune session Claude reliée : format interne changé ?",
         "broken": "Radar en panne : {error}",
         "snapshot_failed": "paradev snapshot a échoué",
@@ -438,6 +441,15 @@ def save_paused(terminal_ids, now, path=None):
     paused = {k: v for k, v in load_paused(path).items() if v > keep}
     paused.update({terminal_id: now for terminal_id in terminal_ids})
     _save_json(path, paused)
+
+
+def load_last_project(path=None):
+    return _load_json(path or CONFIG.last_project_file).get("project")
+
+
+def save_last_project(project, now, path=None):
+    """The project you last opened a session in: Next stays there while it has something for you."""
+    _save_json(path or CONFIG.last_project_file, {"project": project, "at": now})
 
 
 def save_opened(terminal_id, activity, now, path=None):
@@ -793,6 +805,8 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             row.role = role
             if orchestrator and orchestrator["inbox"]:
                 row.label += f"  ·  {text('reports', count=orchestrator['inbox'])}"
+            elif role == "worker" and verdict.bucket == NEEDS:
+                row.label += f"  ·  ↳ {topic}"
             row.status = status or ""
             row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
@@ -828,16 +842,46 @@ def urgency(row, now):
     return 1 if age < 3600 else (2 if age < 86400 else 3)
 
 
+def _opener(row, plugin):
+    """Open the row's pane, mark its message opened, and remember its project for Next."""
+    return _params(plugin, "open", row.workspace_id, row.pane_id, row.terminal_id, row.activity, row.project)
+
+
+def _skip(row, plugin):
+    return _params(plugin, "skip", row.terminal_id, row.activity)
+
+
+def next_row(rows, last_project=None):
+    """Where to go now: the oldest unopened row of the project you were last in, so you finish a
+    project before switching, else the oldest anywhere. Dialogs and failures come first either way."""
+    waiting = sorted((r for r in rows if r.verdict.bucket == NEEDS and not r.opened),
+                     key=lambda r: (r.verdict.rank, r.since or 0))
+    here = [r for r in waiting if last_project and r.project == last_project]
+    return (here or waiting or [None])[0]
+
+
+def _next_lines(row, plugin):
+    if not row:
+        return []
+    label = f"{row.label}  ·  {row.project}" if row.project else row.label
+    opener = _opener(row, plugin)
+    return [f"{text('next', label=_safe(label))} | {opener} refresh=true length=60 {FLAGS}",
+            f"--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}",
+            f"--{text('skip')} | sfimage=forward {_skip(row, plugin)} refresh=true {FLAGS}",
+            "---"]
+
+
 def _row_lines(row, plugin, now, mark, depth=0):
     """One short line; hovering opens Open and Snooze, so Open sits right under the pointer."""
     p = "--" * depth
     # refresh=true redraws the menu right after the click, with this row moved to the end.
-    opener = _params(plugin, "open", row.workspace_id, row.pane_id, row.terminal_id, row.activity)
+    opener = _opener(row, plugin)
     # SwiftBar 2.1 drops the submenu routing of an action-less row when it patches the menu in
     # place, which greys the row out. An action on the row itself keeps it enabled.
     lines = [f"{p}{mark}  {_safe(row.label)} | {opener} refresh=true length=55 {FLAGS}"]
     lines.append(f"{p}--{text('open')} | sfimage=arrow.up.forward.app {opener} refresh=true {FLAGS}")
     if row.verdict.bucket == NEEDS:
+        lines.append(f"{p}--{text('skip')} | sfimage=forward {_skip(row, plugin)} refresh=true {FLAGS}")
         lines.append(f"{p}--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
         for label, until in snooze_choices(now):
             action = _params(plugin, "snooze", row.terminal_id, row.activity, int(until))
@@ -853,10 +897,10 @@ def _groups(rows, plugin, now, depth=0):
     p = "--" * depth
     needs = [r for r in rows if r.verdict.bucket == NEEDS]
     checks = [r for r in rows if r.verdict.bucket == CHECK]
-    handed = [r for r in rows if r.verdict.bucket == HANDED]
     groups, lines = {}, []
-    # A row opened since its last message goes last: it is being answered, not waiting.
-    for row in sorted(needs, key=lambda r: (r.opened, urgency(r, now), r.since or 0)):
+    # Dialogs and failures first, then oldest first, so nothing rots at the bottom. A row opened
+    # since its last message goes last: it is being answered, not waiting.
+    for row in sorted(needs, key=lambda r: (r.opened, r.verdict.rank, r.since or 0)):
         groups.setdefault(row.project, []).append(row)
     for index, (project, members) in enumerate(groups.items()):
         if index:
@@ -868,38 +912,13 @@ def _groups(rows, plugin, now, depth=0):
         if pausable:
             lines.append(f"{p}--{text('pause_all', count=len(pausable))} | sfimage=pause.circle "
                          f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
-        lines += _project_lines(members, handed, plugin, now, depth)
+        for row in members:
+            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
     if checks:
         heading = text("check", minutes=CONFIG.stale_after_minutes)
         lines += [f"{p}---", f"{p}{heading} | size=11 color={GREY} {FLAGS}"]
         for row in checks:
             lines += _row_lines(row, plugin, now, "⏳", depth)
-    return lines
-
-
-def _project_lines(members, handed, plugin, now, depth=0):
-    """A project's rows: solo sessions first, then one block per orchestrated topic.
-
-    In a topic, the workers talking to you come before the orchestrator, and the workers that only
-    wait on the orchestrator fold into one submenu at the end."""
-    p = "--" * depth
-    lines, topics = [], {}
-    for row in members:
-        if row.topic:
-            topics.setdefault(row.topic, []).append(row)
-        else:
-            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
-    for topic, rows in topics.items():
-        lines.append(f"{p}{_safe(topic)} | size=11 color={GREY} {FLAGS}")
-        for row in sorted(rows, key=lambda r: r.role == "orchestrator"):
-            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
-        waiting = [r for r in handed if r.topic == topic and r.project == rows[0].project]
-        if waiting:
-            # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
-            lines.append(f"{p}{text('handed', count=len(waiting))} | sfimage=arrow.turn.down.right "
-                         f"color={GREY} refresh=true {FLAGS}")
-            for row in sorted(waiting, key=lambda r: r.since or 0):
-                lines += _row_lines(row, plugin, now, "·", depth + 1)
     return lines
 
 
@@ -967,7 +986,7 @@ def _paused_lines(rows, plugin):
     return lines
 
 
-def render(radar, plugin, now, focus=None, ignored=None):
+def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
     ignored = ignored or {}
     project = focus["project"] if focus else None
     # An ignored project neither shows nor counts, even if it is the one in focus.
@@ -990,6 +1009,7 @@ def render(radar, plugin, now, focus=None, ignored=None):
         lines.append("---")
     if not radar.warning and not needs:
         lines.append(f"{text('inbox_zero')} | {FLAGS}")
+    lines += _next_lines(next_row(shown, last_project), plugin)
     if lost:
         lines += _interrupted_lines(lost, plugin) + (["---"] if shown else [])
     lines += _groups(shown, plugin, now)
@@ -1195,10 +1215,12 @@ def main(argv, plugin):
     if argv[:1] == ["open"] and not argv[1].startswith("demo-"):
         if len(argv) > 3 and argv[3]:
             save_opened(argv[3], argv[4] if len(argv) > 4 else "", now)
+        if len(argv) > 5 and argv[5]:
+            save_last_project(argv[5], now)
         open_workspace(argv[1], argv[2] if len(argv) > 2 else "")
         return 0
     if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"],
-                    ["dismiss"], ["pause"], ["resume-paused"]) and CONFIG.demo:
+                    ["dismiss"], ["pause"], ["resume-paused"], ["skip"]) and CONFIG.demo:
         return 0
     if argv[:1] == ["resume"] and len(argv) > 2:
         resume(argv[1], argv[2])
@@ -1217,6 +1239,9 @@ def main(argv, plugin):
             if (row.terminal_id in paused) == (argv[0] == "resume-paused") and (project is None or row.project == project):
                 resume(row.workspace_id, row.terminal_id)
                 time.sleep(2)  # one Claude at a time starting up, not twenty at once
+        return 0
+    if argv[:1] == ["skip"] and len(argv) > 1:
+        save_opened(argv[1], argv[2] if len(argv) > 2 else "", now)
         return 0
     if argv[:1] == ["snooze"]:
         until = float(argv[3]) if len(argv) > 3 and argv[3] else None
@@ -1243,7 +1268,7 @@ def main(argv, plugin):
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
-    print(render(radar, plugin, now, load_focus(now), load_ignored(now)))
+    print(render(radar, plugin, now, load_focus(now), load_ignored(now), load_last_project()))
     return 0
 
 
