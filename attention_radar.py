@@ -968,9 +968,6 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             orchestrator = orchestrators.get(terminal["id"]) or orchestrating.get(workspace["id"])
             topic, picked_up = topics.get(workspace["id"], ("", False))
             role = "orchestrator" if orchestrator else ("worker" if topic else "")
-            # Its turn ended on a report: the orchestrator answers it, or tells you to go there.
-            if role == "worker" and verdict.bucket == NEEDS and verdict.rank and picked_up and transcript.handed_off:
-                verdict = Verdict(HANDED)
             # The session's own word for this turn, if it wrote one since the prompt that started it.
             # A session on a recurring cron keeps its word from any tick since your last message.
             loop = transcript.recurring_cron and session_status not in RUNNING_STATUSES
@@ -980,6 +977,13 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 turn = min(turn, transcript.you_at)
             if status and status.get("at", 0) < turn:
                 status = None
+            # Its turn ended on a report: the orchestrator answers it, or tells you to go there.
+            # Unless the worker's own status says the next move is yours: a `done` report followed by
+            # "approve: run /implement-prd here" waits on you, not on an orchestrator that may sleep for an hour.
+            asks_you = bool(status) and status["label"] in WANTS_YOU
+            if role == "worker" and verdict.bucket == NEEDS and verdict.rank and picked_up and transcript.handed_off \
+                    and not asks_you:
+                verdict = Verdict(HANDED)
             if loop and status and status["label"] in WANTS_YOU and verdict.bucket != NEEDS:
                 verdict = Verdict(NEEDS)
             # A tick that ended on "nothing for you": not waiting, unless a dialog, a failure or an

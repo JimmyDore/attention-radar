@@ -118,7 +118,7 @@ ACME  ·  3
 🟠  fix-login                         a session of its own
 ```
 
-- A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It leaves the menu and isn't counted: its report shows on the orchestrator's row. That holds only while the orchestrator's workspace has a live Claude to read the report.
+- A worker whose last action before it stopped was a report to its orchestrator waits on the orchestrator. It leaves the menu and isn't counted: its report shows on the orchestrator's row. That holds only while the orchestrator's workspace has a live Claude to read the report, and only if the worker's own status file for that turn doesn't say it wants you (`approve`, `decisions`…): then it stays counted.
 - A worker that stopped without reporting (a grill, a skill prompt), or kept working after its report and stopped later, is talking to you. It shows as an ordinary row, named after its topic, and is counted. So does a `waiting` report, which points you at the worker's terminal.
 - The orchestrator shows how many reports it hasn't read.
 - Topic sessions also write `~/.cache/topic-orchestrator/<topic>/status/<workspace id>.json` each turn: `{"label", "count", "next", "at", "terminal", …}`. A status written since the turn's prompt gives the row its label and hover text, and `quiet` or `working` keeps the session out of the count. Set the folders with `status_dirs`.

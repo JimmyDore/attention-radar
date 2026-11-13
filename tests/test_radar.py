@@ -635,14 +635,14 @@ class HandOff(Base):
             {"id": "ww", "name": "ticket-42", "project": "acme", "terminals": [term("work")]},
         ]}
 
-    def build(self, worker, orch_live=True, inbox=1):
+    def build(self, worker, orch_live=True, inbox=1, statuses=None):
         snap = self.snap()
         if not orch_live:
             snap["workspaces"][0]["terminals"] = []
         sessions = {"orch": {"status": "idle", "sessionId": "o"}, "work": {"status": "idle", "sessionId": "w"}}
         orchestrators = {"orch": {"topic": "billing", "workers": {"ww"}, "inbox": inbox}}
         return ar.build(snap, sessions, set(), {}, NOW, subagents=lambda s: None, orchestrators=orchestrators,
-                        read=lambda s: worker if s["sessionId"] == "w" else t(last_ts=NOW - 60))
+                        read=lambda s: worker if s["sessionId"] == "w" else t(last_ts=NOW - 60), statuses=statuses)
 
     def test_handed_off_worker_waits_on_the_orchestrator(self):
         radar = self.build(t(last_ts=NOW - 60, handed_off=True))
@@ -658,6 +658,17 @@ class HandOff(Base):
     def test_a_dialog_beats_the_report(self):
         radar = self.build(t(last_ts=NOW - 60, handed_off=True, open_dialog=True))
         self.assertEqual(next(r for r in radar.rows if r.terminal_id == "work").verdict.bucket, ar.NEEDS)
+
+    def test_a_status_asking_you_beats_the_report(self):
+        status = {"label": "approve", "next": "/clear then /implement-prd", "at": NOW - 30}
+        radar = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100, handed_off=True), statuses={"work": status})
+        worker = next(r for r in radar.rows if r.terminal_id == "work")
+        self.assertEqual((worker.verdict.bucket, worker.reason), (ar.NEEDS, "approve"))
+
+    def test_a_quiet_status_keeps_the_report_handed(self):
+        status = {"label": "quiet", "at": NOW - 30}
+        radar = self.build(t(last_ts=NOW - 20, turn_start=NOW - 100, handed_off=True), statuses={"work": status})
+        self.assertEqual(next(r for r in radar.rows if r.terminal_id == "work").verdict.bucket, ar.HANDED)
 
     def test_no_live_orchestrator_to_read_the_report_means_you(self):
         radar = self.build(t(last_ts=NOW - 60, handed_off=True), orch_live=False)
