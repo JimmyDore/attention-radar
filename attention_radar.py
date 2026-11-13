@@ -42,6 +42,9 @@ PAUSABLE_STATUSES = {"idle", "waiting", "shell"}
 # "terminal-exited"; a reason it doesn't know keeps a paused pane dead until you resume it.
 PAUSED_REASON = "paused"
 INTERRUPTED_DAYS = 7
+# Claude Code fires each recurring cron at its own fixed delay after the schedule, measured on the
+# last tick seen. A tick later than that delay plus this margin was missed.
+TICK_GRACE = 15 * 60
 
 NEEDS = "needs"
 CHECK = "check"
@@ -201,6 +204,12 @@ class Transcript:
     turn_start: Optional[float] = None  # when the last prompt (yours, a tick, a cron) arrived
     dialog_count: int = 0  # questions in the open AskUserQuestion, 0 for a plan to approve
     handed_off: bool = False  # the last thing the session did was report to its orchestrator
+    cron_due: Optional[float] = None  # when the next recurring tick should fire after the last activity
+    you_at: Optional[float] = None  # your last message
+    held_ask: bool = False  # a turn since your last message ended on a question, even if later turns did not
+    held_text: str = ""
+    held_at: Optional[float] = None
+    held_at_raw: str = ""
 
 
 @dataclass
@@ -261,12 +270,14 @@ def classify(state, status, transcript, failed, now, activity_at=None, serving=F
         return Verdict(NEEDS)
     if status is None:
         return Verdict(HIDDEN) if state in ("working", "starting") else Verdict(NEEDS)
-    if status in RUNNING_STATUSES or transcript.recurring_cron:
+    if status in RUNNING_STATUSES:
         seen = [t for t in (activity_at, transcript.last_ts) if t]
         stale = seen and now - max(seen) > CONFIG.stale_after_minutes * 60
         if stale and not (transcript.wake_at and transcript.wake_at > now):
             return Verdict(CHECK)
         return Verdict(HIDDEN)
+    if transcript.recurring_cron:
+        return classify_loop(transcript, now)
     if transcript.wake_at and transcript.wake_at > now:
         return Verdict(HIDDEN)
     if failed:
@@ -274,11 +285,110 @@ def classify(state, status, transcript, failed, now, activity_at=None, serving=F
     return Verdict(NEEDS)
 
 
+def classify_loop(transcript, now):
+    """A session that a recurring cron wakes up: between ticks it waits on its cron, not on you.
+
+    A question from any tick since your last message stays in the queue until you answer, even when
+    later ticks end on "no change". Without a question it stays hidden until a tick is missed."""
+    if transcript.held_ask:
+        return Verdict(NEEDS)
+    if transcript.cron_due is None:
+        stale = transcript.last_ts and now - transcript.last_ts > CONFIG.stale_after_minutes * 60
+        return Verdict(CHECK) if stale else Verdict(HIDDEN)
+    return Verdict(CHECK) if now > transcript.cron_due + TICK_GRACE else Verdict(HIDDEN)
+
+
+def _cron_values(spec, low, high):
+    values = set()
+    for part in spec.split(","):
+        span, slash, step = part.partition("/")
+        step = int(step) if slash else 1
+        if span == "*":
+            start, end = low, high
+        elif "-" in span:
+            start, end = (int(v) for v in span.split("-", 1))
+        else:
+            start = int(span)
+            end = high if slash else start
+        if step < 1 or start < low or end > high:
+            raise ValueError(spec)
+        values.update(range(start, end + 1, step))
+    return values
+
+
+def cron_next(expr, after):
+    """Next local time a five-field cron is scheduled strictly after `after`, None if unreadable or over a week off."""
+    return _cron_scan(expr, after, 1)
+
+
+def cron_prev(expr, at):
+    """Last local time a five-field cron was scheduled at or before `at`."""
+    return _cron_scan(expr, at, -1)
+
+
+def _cron_scan(expr, start, direction):
+    try:
+        minute, hour, dom, month, dow = expr.split()
+        minutes, hours = _cron_values(minute, 0, 59), _cron_values(hour, 0, 23)
+        days, months = _cron_values(dom, 1, 31), _cron_values(month, 1, 12)
+        weekdays = {d % 7 for d in _cron_values(dow, 0, 7)}
+    except (ValueError, AttributeError):
+        return None
+    moment = dt.datetime.fromtimestamp(start).replace(second=0, microsecond=0)
+    if direction < 0:
+        moment += dt.timedelta(minutes=1)
+    for _ in range(8 * 24 * 60):
+        moment += dt.timedelta(minutes=direction)
+        if moment.minute not in minutes or moment.hour not in hours or moment.month not in months:
+            continue
+        on_day, on_weekday = moment.day in days, (moment.weekday() + 1) % 7 in weekdays
+        # Cron's rule: with both day fields restricted, either one matching is enough.
+        if (on_day or on_weekday) if dom != "*" and dow != "*" else (on_day and on_weekday):
+            return moment.timestamp()
+    return None
+
+
+def tick_due(cron, fired, last_ts):
+    """When the next tick of a recurring cron should have arrived, its usual delay included.
+
+    The delay comes from the last tick seen. Without one, allow half a period."""
+    expr, prompt = cron
+    last = fired.get(prompt.strip()) if prompt else None
+    if last:
+        scheduled, upcoming = cron_prev(expr, last), cron_next(expr, last)
+        return upcoming + (last - scheduled) if scheduled and upcoming else None
+    upcoming = cron_next(expr, last_ts) if last_ts else None
+    following = upcoming and cron_next(expr, upcoming)
+    return upcoming + (following - upcoming) / 2 if following else None
+
+
+def _from_you(entry, prompt):
+    origin = entry.get("origin")
+    if isinstance(origin, dict):
+        return origin.get("kind") == "human"
+    return not entry.get("isMeta") and not prompt.lstrip().startswith("<")
+
+
 def parse_transcript(lines):
     info = Transcript()
     open_ids = set()
-    crons = set()
+    crons = {}  # recurring cron id -> (expression, prompt), None if the CronCreate call fell outside the tail
+    exprs = {}  # CronCreate tool_use id -> (expression, prompt)
+    fired = {}  # prompt the session did not get from you -> when it last arrived
     asks = handed = False
+    asked_at = asked_raw = None
+    held = None
+
+    def prompt_arrives(entry, prompt):
+        nonlocal held
+        if asks:
+            held = (info.last_text, asked_at, asked_raw)
+        if _from_you(entry, prompt):
+            held = None
+            info.you_at = info.last_ts
+        elif info.last_ts:
+            fired[prompt.strip()] = info.last_ts
+
     for line in lines:
         try:
             entry = json.loads(line)
@@ -295,27 +405,36 @@ def parse_transcript(lines):
             info.wake_at = result["scheduledFor"] / 1000
         if isinstance(result, dict) and result.get("nextFireAt"):
             if result.get("recurring"):
-                crons.add(result.get("id"))
+                calls = [b.get("tool_use_id") for b in (entry.get("message") or {}).get("content") or []
+                         if isinstance(b, dict) and b.get("type") == "tool_result"]
+                crons[result.get("id")] = next((exprs[c] for c in calls if c in exprs), None)
             else:
                 info.wake_at = result["nextFireAt"] / 1000
         content = (entry.get("message") or {}).get("content")
         if not isinstance(content, list):
             if entry["type"] == "user" and isinstance(content, str) and content.strip():
+                prompt_arrives(entry, content)
                 asks = handed = False
                 info.turn_start = info.last_ts
             continue
-        if entry["type"] == "user" and any(isinstance(b, dict) and b.get("type") == "text" for b in content):
+        prompts = [b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text"]
+        if entry["type"] == "user" and prompts:
+            prompt_arrives(entry, prompts[0])
             info.turn_start = info.last_ts
         for block in content:
             kind = block.get("type") if isinstance(block, dict) else None
             if kind == "text" and entry["type"] == "assistant" and block.get("text", "").strip():
                 info.last_text = block["text"]
                 asks = asks_question(block["text"])
+                asked_at, asked_raw = info.last_ts, info.last_ts_raw
             elif kind == "tool_use" or (kind == "text" and entry["type"] == "user"):
                 asks = False
                 handed = kind == "tool_use" and hands_off(block)
             if kind == "tool_use" and block.get("name") == "CronDelete":
-                crons.discard((block.get("input") or {}).get("id"))
+                crons.pop((block.get("input") or {}).get("id"), None)
+            elif kind == "tool_use" and block.get("name") == "CronCreate":
+                made = block.get("input") or {}
+                exprs[block.get("id")] = (made.get("cron"), made.get("prompt") or "")
             elif kind == "tool_use" and block.get("name") in DIALOG_TOOLS:
                 open_ids.add(block.get("id"))
                 questions = (block.get("input") or {}).get("questions") or [{}]
@@ -325,6 +444,14 @@ def parse_transcript(lines):
                 open_ids.discard(block.get("tool_use_id"))
     info.open_dialog = bool(open_ids)
     info.recurring_cron = bool(crons)
+    dues = [d for d in (tick_due(cron, fired, info.last_ts) for cron in crons.values() if cron) if d]
+    if dues and len(dues) == len(crons):
+        info.cron_due = min(dues)
+    if asks:
+        held = (info.last_text, asked_at, asked_raw)
+    if held:
+        info.held_ask = True
+        info.held_text, info.held_at, info.held_at_raw = held[0], held[1], held[2] or ""
     info.asks = asks
     info.handed_off = handed
     return info
@@ -845,12 +972,22 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             if role == "worker" and verdict.bucket == NEEDS and verdict.rank and picked_up and transcript.handed_off:
                 verdict = Verdict(HANDED)
             # The session's own word for this turn, if it wrote one since the prompt that started it.
+            # A session on a recurring cron keeps its word from any tick since your last message.
+            loop = transcript.recurring_cron and session_status not in RUNNING_STATUSES
             status = statuses.get(terminal["id"]) or statuses.get(workspace["id"])
             turn = transcript.turn_start or ((transcript.last_ts or 0) - 300)
+            if loop and transcript.you_at:
+                turn = min(turn, transcript.you_at)
             if status and status.get("at", 0) < turn:
                 status = None
-            # A tick that ended on "nothing for you": not waiting, unless a dialog or a failure says otherwise.
-            if status and status["label"] in WANTS_NOTHING and verdict.bucket == NEEDS and verdict.rank:
+            if loop and status and status["label"] in WANTS_YOU and verdict.bucket != NEEDS:
+                verdict = Verdict(NEEDS)
+            # A tick that ended on "nothing for you": not waiting, unless a dialog, a failure or an
+            # unanswered question from an earlier tick says otherwise.
+            # A question from an earlier tick holds until a later status says otherwise: the session
+            # may have dropped it on its own.
+            held = loop and transcript.held_ask and not (status and status.get("at", 0) >= (transcript.held_at or 0))
+            if status and status["label"] in WANTS_NOTHING and verdict.bucket == NEEDS and verdict.rank and not held:
                 continue
             if verdict.bucket == HIDDEN:
                 continue
@@ -862,10 +999,16 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
             elif shared and title:
                 label = f"{label} › {title}"
             since = transcript.last_ts or (session and (session.get("statusUpdatedAt") or 0) / 1000) or None
-            shown = transcript.dialog_text if transcript.open_dialog and transcript.dialog_text else transcript.last_text
+            said, activity = transcript.last_text, transcript.last_ts_raw
+            # A question an earlier tick asked: show it, and date it from then so later ticks
+            # neither reset its age nor end a snooze.
+            if held and not transcript.open_dialog:
+                said, since, activity = transcript.held_text, transcript.held_at or since, \
+                    transcript.held_at_raw or activity
+            shown = transcript.dialog_text if transcript.open_dialog and transcript.dialog_text else said
             row = Row(
                 workspace["id"], terminal["id"], label, workspace.get("project") or "", verdict,
-                since, excerpt(shown), transcript.last_ts_raw, session_id,
+                since, excerpt(shown), activity, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
             row.topic = (orchestrator.get("topic") or "topic") if orchestrator else topic
@@ -884,7 +1027,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                     row.reason = f"decisions {transcript.dialog_count}" if transcript.dialog_count else "approve"
                     row.hint = transcript.dialog_text
                 else:
-                    row.reason = infer_reason(transcript.last_text)
+                    row.reason = infer_reason(said)
                 row.hint = row.hint or row.excerpt
             row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):

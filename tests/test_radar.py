@@ -747,6 +747,117 @@ class Reason(Base):
             self.assertEqual(ar.status_reason({"label": "decisions", "count": 0}), "decisions")
 
 
+def iso(ts):
+    return ar.dt.datetime.fromtimestamp(ts, ar.dt.timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def loop_transcript(*turns, cron="13 */2 * * *", you_at=None):
+    """A session that made a recurring cron, then got ticks. Each turn is (when the tick fired, closing text)."""
+    lines = []
+    if you_at:
+        lines.append(line("user", "start the loop", ts=iso(you_at), origin={"kind": "human"}))
+    lines += [
+        line("assistant", [{"type": "tool_use", "id": "u1", "name": "CronCreate",
+                            "input": {"cron": cron, "prompt": "/orch tick", "recurring": True}}], ts=iso(turns[0][0] - 600)),
+        line("user", [{"type": "tool_result", "tool_use_id": "u1"}], ts=iso(turns[0][0] - 599),
+             toolUseResult={"id": "c1", "recurring": True, "nextFireAt": 1}),
+    ]
+    for at, said in turns:
+        lines.append(line("user", "/orch tick", ts=iso(at), isMeta=True))
+        lines.append(line("assistant", [{"type": "text", "text": said}], ts=iso(at + 60)))
+    return ar.parse_transcript(lines)
+
+
+def local(hour, minute=0, days=0):
+    day = ar.dt.datetime.fromtimestamp(NOW).date() + ar.dt.timedelta(days=days)
+    return ar.dt.datetime.combine(day, ar.dt.time(hour, minute)).timestamp()
+
+
+class Loop(Base):
+    """A session on a recurring cron: hidden between ticks, queued when a tick asks, checked when a tick is late."""
+
+    def verdict(self, transcript, now):
+        return ar.classify("idle", "idle", transcript, False, now)
+
+    def test_cron_next_reads_the_common_forms(self):
+        self.assertEqual(ar.cron_next("13 */2 * * *", local(6, 13)), local(8, 13))
+        self.assertEqual(ar.cron_next("13 */2 * * *", local(8, 20)), local(10, 13))
+        self.assertEqual(ar.cron_next("*/15 * * * *", local(8, 1)), local(8, 15))
+        self.assertEqual(ar.cron_next("0 9 * * *", local(9, 0)), local(9, days=1))
+        self.assertIsNone(ar.cron_next("not a cron", local(9)))
+
+    def test_cron_prev_includes_the_minute_itself(self):
+        self.assertEqual(ar.cron_prev("13 */2 * * *", local(8, 13) + 30), local(8, 13))
+        self.assertEqual(ar.cron_prev("13 */2 * * *", local(8, 12)), local(6, 13))
+
+    def test_quiet_between_ticks_is_hidden_even_past_60_minutes(self):
+        info = loop_transcript((local(8, 13), "Tick: no change."))
+        self.assertEqual(info.cron_due, local(10, 13))
+        self.assertEqual(self.verdict(info, local(9, 50)).bucket, ar.HIDDEN)
+
+    def test_a_missed_tick_goes_to_check(self):
+        info = loop_transcript((local(8, 13), "Tick: no change."))
+        self.assertEqual(self.verdict(info, local(10, 25)).bucket, ar.HIDDEN)
+        self.assertEqual(self.verdict(info, local(10, 30)).bucket, ar.CHECK)
+
+    def test_a_cron_that_always_fires_late_is_expected_late(self):
+        # Claude Code fired "17 */2" at :47: the next tick is expected at :47 too.
+        info = loop_transcript((local(8, 47), "Tick: no change."), cron="17 */2 * * *")
+        self.assertEqual(info.cron_due, local(10, 47))
+        self.assertEqual(self.verdict(info, local(10, 55)).bucket, ar.HIDDEN)
+
+    def test_a_question_from_a_tick_queues_it(self):
+        info = loop_transcript((local(8, 13), "VIA-12 finished. Do I start VIA-13 now?"))
+        self.assertEqual(self.verdict(info, local(8, 30)).bucket, ar.NEEDS)
+
+    def test_the_question_outlives_later_quiet_ticks(self):
+        info = loop_transcript((local(6, 13), "Do I start VIA-13 now?"), (local(8, 13), "Tick: no change."))
+        self.assertEqual(self.verdict(info, local(8, 30)).bucket, ar.NEEDS)
+        self.assertEqual((info.held_text, info.held_at), ("Do I start VIA-13 now?", local(6, 14)))
+
+    def test_your_answer_clears_the_question(self):
+        asked = [
+            line("assistant", [{"type": "tool_use", "id": "u1", "name": "CronCreate",
+                                "input": {"cron": "13 */2 * * *", "recurring": True}}], ts=iso(local(6))),
+            line("user", [{"type": "tool_result", "tool_use_id": "u1"}], ts=iso(local(6)),
+                 toolUseResult={"id": "c1", "recurring": True, "nextFireAt": 1}),
+            line("user", "/orch tick", ts=iso(local(6, 13)), isMeta=True),
+            line("assistant", [{"type": "text", "text": "Do I start VIA-13 now?"}], ts=iso(local(6, 14))),
+        ]
+        answer = [line("user", "yes", ts=iso(local(7)), origin={"kind": "human"}),
+                  line("assistant", [{"type": "text", "text": "Started."}], ts=iso(local(7, 1)))]
+        self.assertTrue(ar.parse_transcript(asked).held_ask)
+        answered = ar.parse_transcript(asked + answer)
+        self.assertFalse(answered.held_ask)
+        self.assertEqual(answered.you_at, local(7))
+        self.assertEqual(self.verdict(answered, local(7, 30)).bucket, ar.HIDDEN)
+
+    def test_a_status_from_an_earlier_tick_still_wants_you(self):
+        info = loop_transcript((local(6, 13), "Tick done."), (local(8, 13), "Tick: no change."), you_at=local(5))
+        status = {"label": "question", "next": "VIA-13 or VIA-14 first", "at": local(6, 14)}
+        radar = ar.build(Reason().snap(), {"t1": {"status": "idle", "sessionId": "s"}}, set(), {}, local(8, 30),
+                         read=lambda s: info, subagents=lambda s: None, statuses={"t1": status})
+        self.assertEqual((radar.rows[0].reason, radar.rows[0].hint), ("question", "VIA-13 or VIA-14 first"))
+
+    def loop_build(self, info, status_at):
+        return ar.build(Reason().snap(), {"t1": {"status": "idle", "sessionId": "s"}}, set(), {}, local(8, 30),
+                        read=lambda s: info, subagents=lambda s: None,
+                        statuses={"t1": {"label": "quiet", "at": status_at}})
+
+    def test_a_held_question_keeps_its_date_over_an_older_quiet_status(self):
+        info = loop_transcript((local(6, 13), "Do I start VIA-13 now?"), (local(8, 13), "Tick: no change."),
+                               you_at=local(5))
+        row = self.loop_build(info, local(5, 30)).rows[0]
+        asked = local(6, 14)
+        self.assertEqual((row.since, row.activity, row.reason), (asked, iso(asked), "question"))
+        self.assertIn("VIA-13", row.excerpt)
+
+    def test_a_quiet_status_after_the_question_drops_it(self):
+        # The session withdrew it on its own, e.g. the workspace it asked about is gone.
+        info = loop_transcript((local(6, 13), "Do I start VIA-13 now?"), (local(8, 13), "Dropped that question."))
+        self.assertEqual(self.loop_build(info, local(8, 14)).rows, [])
+
+
 class Render(Base):
     def row(self, bucket=ar.NEEDS, project="acme", since=NOW - 7200, kind="", rank=1, label="feature-1"):
         return ar.Row("w1", "t1", label, project, ar.Verdict(bucket, rank, kind), since, "end", "r", pane_id="p1")
