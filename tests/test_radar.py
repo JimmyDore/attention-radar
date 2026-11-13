@@ -365,7 +365,7 @@ class Interrupted(Base):
         radar = ar.Radar(interrupted=self.rows(snapshot(), [binding()]))
         out = ar.render(radar, "/p", NOW)
         self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full")
-        self.assertIn('param1="resume" param2="w1" param3="dead" param4=""', out)
+        self.assertIn('param1="resume" param2="w1" param3="dead" param4="-"', out)
         self.assertIn('param1="resume-all"', out)
         self.assertIn('param1="dismiss" param2="s1"', out)
         self.assertNotIn("Inbox zero", out)
@@ -1046,6 +1046,24 @@ class Settings(Base):
             finally:
                 ar.CONFIG_FILE = old
         self.assertTrue(out.getvalue().startswith("!"))
+
+    def test_open_with_no_pane_yet_marks_the_right_session_opened(self):
+        # SwiftBar drops an empty param: the pane travels as "-" so the terminal stays in its place.
+        row = ar.Row("w1", "t1", "x", "acme", ar.Verdict(ar.NEEDS), NOW, "", "2026-11-13T09:01:45Z")
+        opener = ar._opener(row, "/p")
+        self.assertIn('param3="-" param4="t1"', opener)
+        argv = [part.split('="', 1)[1].rstrip('"') for part in opener.split() if part.startswith("param")]
+        with tempfile.TemporaryDirectory() as folder:
+            opened, last = os.path.join(folder, "o.json"), os.path.join(folder, "l.json")
+            old, ar.CONFIG_FILE = ar.CONFIG_FILE, self.write(folder, {"opened_file": opened,
+                                                                       "last_project_file": last})
+            calls, real, ar.open_workspace = [], ar.open_workspace, lambda *a: calls.append(a)
+            try:
+                ar.main(argv, "/p")
+            finally:
+                ar.CONFIG_FILE, ar.open_workspace = old, real
+            self.assertEqual(ar.load_opened(opened)["t1"]["activity"], "2026-11-13T09:01:45Z")
+            self.assertEqual(calls, [("w1", "")])
 
     def test_french(self):
         ar.configure(ar.Config(language="fr"))

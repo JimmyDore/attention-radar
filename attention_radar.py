@@ -1044,9 +1044,14 @@ def _safe(content):
     return content.replace("|", " ").replace("\n", " ")
 
 
+# SwiftBar drops an empty param, which shifts every later one: a click on a row whose pane id was not
+# known yet marked the wrong session opened. Empty values travel as this and come back empty.
+EMPTY_PARAM = "-"
+
+
 def _params(plugin, *args):
     parts = [f"bash=\"{plugin}\""]
-    parts += [f"param{i + 1}=\"{value}\"" for i, value in enumerate(args)]
+    parts += [f"param{i + 1}=\"{value or EMPTY_PARAM}\"" for i, value in enumerate(args)]
     return " ".join(parts) + " terminal=false"
 
 
@@ -1426,6 +1431,7 @@ def doctor():
 
 def main(argv, plugin):
     now = dt.datetime.now().timestamp()
+    argv = ["" if arg == EMPTY_PARAM else arg for arg in argv]
     try:
         configure(load_config())
     except (OSError, ValueError, TypeError) as error:
