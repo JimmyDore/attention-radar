@@ -115,6 +115,7 @@ TEXTS = {
         "open": "Open workspace",
         "snooze": "Snooze",
         "until": "Until {hour}:00",
+        "until_next": "Until its next message",
         "tomorrow": "Tomorrow {hour}:00",
         "inbox_zero": "Inbox zero",
         "check": "TO CHECK  ·  no activity for {minutes} min",
@@ -147,6 +148,7 @@ TEXTS = {
         "open": "Ouvrir le workspace",
         "snooze": "Snoozer",
         "until": "Jusqu'à {hour} h",
+        "until_next": "Jusqu'à son prochain message",
         "tomorrow": "Demain {hour} h",
         "inbox_zero": "Inbox zéro",
         "check": "À VÉRIFIER  ·  plus d'activité depuis {minutes} min",
@@ -656,6 +658,11 @@ def snooze_choices(now):
     return choices + [(text("tomorrow", hour=CONFIG.morning_hour), next_morning(now))]
 
 
+# "Until its next message": a snooze already ends when the session writes again, so this one has
+# no real deadline. A week only keeps a session that never speaks again from piling up in snoozes.json.
+NEXT_MESSAGE = 7 * 86400
+
+
 def save_snooze(terminal_id, activity, now, path=None, until=None):
     path = path or CONFIG.snooze_file
     snoozes = {k: v for k, v in load_snoozes(path).items() if v.get("until", 0) > now}
@@ -1116,7 +1123,7 @@ def _row_lines(row, plugin, now, mark, depth=0):
     if row.verdict.bucket == NEEDS:
         lines.append(f"{p}--{text('skip')} | sfimage=forward {_skip(row, plugin)} refresh=true {FLAGS}")
         lines.append(f"{p}--{text('snooze')} | sfimage=moon.zzz {FLAGS}")
-        for label, until in snooze_choices(now):
+        for label, until in [(text("until_next"), now + NEXT_MESSAGE)] + snooze_choices(now):
             action = _params(plugin, "snooze", row.terminal_id, row.activity, int(until))
             lines.append(f"{p}----{label} | {action} refresh=true {FLAGS}")
     if row.pausable:

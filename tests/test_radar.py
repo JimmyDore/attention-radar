@@ -181,6 +181,16 @@ class Snooze(Base):
         evening = dt.datetime(2026, 11, 5, 17, 30).timestamp()
         self.assertEqual([c[0] for c in ar.snooze_choices(evening)], ["1 h", "2 h", "Tomorrow 9:00"])
 
+    def test_until_next_message_is_offered_first_and_ends_on_new_activity(self):
+        row = ar.Row("w1", "t1", "orchestrator", "p", ar.Verdict(ar.NEEDS), NOW - 60, "", "a")
+        lines = ar._row_lines(row, "/p", NOW, "o")
+        snooze = next(i for i, line in enumerate(lines) if line.startswith("--Snooze"))
+        self.assertTrue(lines[snooze + 1].startswith("----Until its next message |"))
+        self.assertIn(f'param4="{int(NOW + ar.NEXT_MESSAGE)}"', lines[snooze + 1])
+        snoozed = {"until": NOW + ar.NEXT_MESSAGE, "activity": "a"}
+        self.assertTrue(ar.is_snoozed(snoozed, "a", NOW + 5 * 3600))
+        self.assertFalse(ar.is_snoozed(snoozed, "b", NOW + 60))
+
     def test_save_uses_the_chosen_end(self):
         with tempfile.TemporaryDirectory() as folder:
             path = os.path.join(folder, "s.json")
@@ -960,7 +970,7 @@ class Render(Base):
         submenu = [line for line in out if line.startswith("--") and not line.startswith("---")]
         self.assertIn('param1="open" param2="w1" param3="p1" param4="t1" param5="r"', submenu[0])
         snoozes = [line for line in out if 'param1="snooze"' in line]
-        self.assertEqual(len(snoozes), len(ar.snooze_choices(NOW)))
+        self.assertEqual(len(snoozes), 1 + len(ar.snooze_choices(NOW)))  # until its next message, then the times
         self.assertIn('param1="snooze" param2="t1" param3="r"', snoozes[0])
 
     def test_focus_keeps_one_project_and_folds_the_others(self):
