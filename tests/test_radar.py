@@ -333,6 +333,15 @@ class Interrupted(Base):
         self.assertEqual([(r.workspace_id, r.session_id, r.agent, r.label) for r in rows],
                          [("w1", "s1", "claude", "feature-1")])
 
+    def test_several_dead_sessions_in_one_workspace_are_named_by_their_pane_title(self):
+        snap = snapshot()
+        snap["workspaces"][0]["layout"] = {"tabs": [
+            {"panes": [{"id": "p1", "terminalId": "dead", "terminalTitle": "Affiche GTA 6"}]},
+            {"panes": [{"id": "p2", "terminalId": "other", "terminalTitle": "Tote bag"}]}]}
+        self.assertEqual([r.label for r in self.rows(snap, [binding()])], ["feature-1 › Affiche GTA 6"])
+        snap["workspaces"][0]["layout"]["tabs"].pop()
+        self.assertEqual([r.label for r in self.rows(snap, [binding()])], ["feature-1"])
+
     def test_swept_as_terminal_exited_is_still_interrupted(self):
         self.assertEqual(len(self.rows(snapshot(), [binding(ended=9, reason="terminal-exited")])), 1)
 

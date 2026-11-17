@@ -836,7 +836,10 @@ def interrupted_rows(snapshot, bindings, dismissed=()):
         if not killed or session_id in back or session_id in dismissed or binding["workspace_id"] not in workspaces:
             continue
         workspace = workspaces[binding["workspace_id"]]
-        row = Row(workspace["id"], binding["terminal_id"], html.unescape(workspace.get("name") or ""),
+        # Several sessions paused in one workspace would all read as its name: their panes keep their titles.
+        titles = pane_titles(workspace)
+        label = session_label(workspace, titles.get(binding["terminal_id"]), len(titles) > 1)
+        row = Row(workspace["id"], binding["terminal_id"], label,
                   workspace.get("project") or "", Verdict(INTERRUPTED), (binding["last_event_at"] or 0) / 1000,
                   "", session_id=session_id)
         row.agent = binding["agent_id"] or "claude"
@@ -913,14 +916,30 @@ def newest_subagent_write(session):
     return max(times) if times else None
 
 
-def pane_ids(workspace):
-    """terminal id -> pane id, across the main area and the right sidebar."""
+def _terminal_panes(workspace):
+    """The panes holding a terminal, across the main area and the right sidebar."""
     layout = workspace.get("layout") or {}
     tabs = list(layout.get("tabs") or []) + list((layout.get("sidebar") or {}).get("tabs") or [])
-    return {
-        pane.get("terminalId"): pane.get("id")
-        for tab in tabs for pane in tab.get("panes") or [] if pane.get("terminalId")
-    }
+    return [pane for tab in tabs for pane in tab.get("panes") or [] if pane.get("terminalId")]
+
+
+def pane_ids(workspace):
+    """terminal id -> pane id."""
+    return {pane["terminalId"]: pane.get("id") for pane in _terminal_panes(workspace)}
+
+
+def pane_titles(workspace):
+    """terminal id -> the title its session last gave it. A pane keeps it after its terminal dies."""
+    return {pane["terminalId"]: pane.get("terminalTitle") or "" for pane in _terminal_panes(workspace)}
+
+
+def session_label(workspace, title, shared):
+    """The workspace, and the session's own title when the workspace holds several or has no real name."""
+    name = workspace.get("name") or ""
+    label, title = html.unescape(name), clean_title(title)
+    if name in PLACEHOLDER_NAMES and not shared:
+        return title or label
+    return f"{label} › {title}" if shared and title else label
 
 
 def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subagents=newest_subagent_write,
@@ -1002,13 +1021,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 continue
             if verdict.bucket == HIDDEN:
                 continue
-            name = workspace.get("name") or ""
-            label = html.unescape(name)
-            title = clean_title(terminal.get("title"))
-            if name in PLACEHOLDER_NAMES and not shared:
-                label = title or name
-            elif shared and title:
-                label = f"{label} › {title}"
+            label = session_label(workspace, terminal.get("title"), shared)
             since = transcript.last_ts or (session and (session.get("statusUpdatedAt") or 0) / 1000) or None
             said, activity = transcript.last_text, transcript.last_ts_raw
             # A question an earlier tick asked: show it, and date it from then so later ticks
