@@ -39,6 +39,7 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 ## Using it
 
 - **→ Next** at the top of the menu says where to go now: the oldest session waiting in the project you last opened one in, so you finish a project before switching, else the oldest anywhere (in the focused project, if there is one). A dialog or a failed turn comes first. Click it to open that session; the next one takes its place.
+- To go to Next from the keyboard, bind the Raycast command **Next Paradev** to a hotkey (see [Install](#next-from-the-keyboard-raycast)).
 - Hover a row (or Next), then **Skip, come back later**: the row goes to the end of its group, out of Next, until the session writes again. Nothing opens.
 - Hover a row to open its workspace or snooze it.
 - Click a row to open its workspace in Paradev, on the right pane.
@@ -76,6 +77,15 @@ agent terminals  12, 12 linked to a Claude session
 ```
 
 To update, run `git pull`. The plugin is a link, so there's nothing to reinstall.
+
+### Next from the keyboard (Raycast)
+
+`raycast/next-paradev.sh` is a [Raycast](https://www.raycast.com) script command, **Next Paradev**. It opens the session Next points at without the mouse. It works Next out when you press it, so pressing twice in a row takes you to two different sessions. A toast says where it went, or "Inbox zero".
+
+1. In Raycast, open Settings → Extensions → Script Commands → **Add Directories**, and pick the repo's `raycast` folder.
+2. Find **Next Paradev** in the list and record a hotkey for it, for example ⌥⌘N.
+
+From a terminal, `python3 attention_radar.py next` does the same.
 
 The menu refreshes every 10 seconds. To change that, rename the link in the plugin folder, for example to `attention-radar.30s.py`.
 

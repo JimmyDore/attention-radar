@@ -1104,6 +1104,33 @@ class Settings(Base):
             self.assertEqual(ar.load_opened(opened)["t1"]["activity"], "2026-11-13T09:01:45Z")
             self.assertEqual(calls, [("w1", "")])
 
+    def test_next_opens_the_next_row_now_and_marks_it_opened(self):
+        import contextlib
+        import io
+        first = ar.Row("w1", "t1", "first", "acme", ar.Verdict(ar.NEEDS), NOW - 600, "", "a1", pane_id="p1")
+        second = ar.Row("w2", "t2", "second", "acme", ar.Verdict(ar.NEEDS), NOW - 60, "", "a2", pane_id="p2")
+        with tempfile.TemporaryDirectory() as folder:
+            opened, last = os.path.join(folder, "o.json"), os.path.join(folder, "l.json")
+            old, ar.CONFIG_FILE = ar.CONFIG_FILE, self.write(folder, {
+                "opened_file": opened, "last_project_file": last,
+                "focus_file": os.path.join(folder, "f.json"), "ignored_file": os.path.join(folder, "i.json")})
+            calls = []
+            saved = ar.open_workspace, ar.load_radar, ar.refresh_menu
+            ar.open_workspace = lambda *a: calls.append(a)
+            ar.load_radar = lambda now: ar.Radar(rows=[second, first])
+            ar.refresh_menu = lambda: None
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    ar.main(["next"], "/p")
+            finally:
+                ar.CONFIG_FILE = old
+                ar.open_workspace, ar.load_radar, ar.refresh_menu = saved
+            self.assertEqual(calls, [("w1", "p1")])
+            self.assertEqual(ar.load_opened(opened)["t1"]["activity"], "a1")
+            self.assertEqual(ar.load_last_project(last), "acme")
+        self.assertIn("first", out.getvalue())
+
     def test_french(self):
         ar.configure(ar.Config(language="fr"))
         self.assertIn("Inbox zéro", ar.render(ar.Radar(), "/p", NOW))

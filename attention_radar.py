@@ -1247,13 +1247,20 @@ def _paused_lines(rows, plugin):
     return lines
 
 
-def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
+def visible_rows(radar, focus=None, ignored=None):
+    """The rows the menu lists at the top: not in an ignored project, and in the focused one if any."""
     ignored = ignored or {}
     project = focus["project"] if focus else None
     # An ignored project neither shows nor counts, even if it is the one in focus.
     rows = [r for r in radar.rows if r.project not in ignored]
+    return rows, [r for r in rows if project is None or r.project == project]
+
+
+def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
+    ignored = ignored or {}
+    project = focus["project"] if focus else None
+    rows, shown = visible_rows(radar, focus, ignored)
     interrupted = [r for r in radar.interrupted if r.project not in ignored]
-    shown = [r for r in rows if project is None or r.project == project]
     others = [r for r in rows if project is not None and r.project != project]
     lost = [r for r in interrupted if project is None or r.project == project]
     lost_others = [r for r in interrupted if project is not None and r.project != project]
@@ -1500,6 +1507,43 @@ def load_snapshot():
     return json.loads(done.stdout)
 
 
+def load_radar(now):
+    sessions = load_sessions()
+    return build(load_snapshot(), sessions, load_failed_terminals(), load_snoozes(), now,
+                 orchestrators=load_orchestrators(), opened=load_opened(),
+                 bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions),
+                 paused=load_paused(), statuses=load_statuses())
+
+
+def refresh_menu():
+    """Redraw the SwiftBar menu now, so the session just opened leaves Next there too."""
+    subprocess.run(["open", "-g", "swiftbar://refreshallplugins"], timeout=5, capture_output=True)
+
+
+def go_next(now):
+    """Open what Next points at, worked out now (for a hotkey, e.g. the Raycast command).
+    Prints one line saying where it went, which Raycast shows as a toast."""
+    if CONFIG.demo:
+        print(text("inbox_zero"))
+        return 0
+    try:
+        radar = load_radar(now)
+    except Exception as error:
+        print(text("broken", error=error))
+        return 1
+    row = next_row(visible_rows(radar, load_focus(now), load_ignored(now))[1], load_last_project())
+    if not row:
+        print(text("inbox_zero"))
+        return 0
+    save_opened(row.terminal_id, row.activity, now)
+    if row.project:
+        save_last_project(row.project, now)
+    open_workspace(row.workspace_id, row.pane_id)
+    refresh_menu()
+    print(f"{row.title}  ·  {row.project}" if row.project else row.title)
+    return 0
+
+
 def doctor():
     """Print what the radar found, for a first install."""
     print(f"config file      {CONFIG_FILE} ({'found' if os.path.exists(CONFIG_FILE) else 'not found, defaults'})")
@@ -1540,6 +1584,8 @@ def main(argv, plugin):
             save_last_project(argv[5], now)
         open_workspace(argv[1], argv[2] if len(argv) > 2 else "")
         return 0
+    if argv[:1] == ["next"]:
+        return go_next(now)
     if argv[:1] in (["open"], ["snooze"], ["focus"], ["unfocus"], ["ignore"], ["unignore"], ["resume"], ["resume-all"],
                     ["dismiss"], ["pause"], ["resume-paused"], ["skip"]) and CONFIG.demo:
         return 0
@@ -1584,11 +1630,7 @@ def main(argv, plugin):
         save_ignored(argv[1], None, now)
         return 0
     try:
-        sessions = load_sessions()
-        radar = build(load_snapshot(), sessions, load_failed_terminals(), load_snoozes(), now,
-                      orchestrators=load_orchestrators(), opened=load_opened(),
-                      bindings=load_bindings(now), dismissed=load_dismissed(), serving=serving_sessions(sessions),
-                      paused=load_paused(), statuses=load_statuses())
+        radar = load_radar(now)
     except Exception as error:  # a broken radar must never read as inbox zero
         print(error_output(text("broken", error=error)))
         return 0
