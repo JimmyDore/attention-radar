@@ -282,6 +282,15 @@ class Build(Base):
         rows = sorted(self.build(snap, sessions).rows, key=lambda r: r.terminal_id)
         self.assertEqual([(r.label, r.pane_id) for r in rows], [("feature-1 › Grill", "p1"), ("feature-1 › Build", "p2")])
 
+    def test_resumed_session_without_terminal_title_is_named_from_its_transcript(self):
+        snap = snapshot(term("t1", title=None), term("t2", title="◐ Build"))
+        sessions = {"t1": {"status": "idle", "sessionId": "a"}, "t2": {"status": "idle", "sessionId": "b"}}
+        transcript = ar.parse_transcript([line("assistant", "Ship it?"),
+                                          json.dumps({"type": "ai-title", "aiTitle": "Tote bag"})])
+        self.assertEqual(transcript.title, "Tote bag")
+        rows = sorted(self.build(snap, sessions, transcript=transcript).rows, key=lambda r: r.terminal_id)
+        self.assertEqual([r.label for r in rows], ["feature-1 › Tote bag", "feature-1 › Build"])
+
     def test_two_sessions_in_a_placeholder_workspace_show_the_workspace(self):
         sessions = {"t1": {"status": "idle", "sessionId": "a"}, "t2": {"status": "idle", "sessionId": "b"}}
         snap = snapshot(term("t1", title="◑ Grill"), term("t2", title="◐ Build"), name="local")

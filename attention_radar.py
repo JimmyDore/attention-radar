@@ -212,6 +212,7 @@ class Transcript:
     held_text: str = ""
     held_at: Optional[float] = None
     held_at_raw: str = ""
+    title: str = ""  # the title Claude Code gave the session, which it only puts on the terminal after a turn
 
 
 @dataclass
@@ -396,6 +397,8 @@ def parse_transcript(lines):
             entry = json.loads(line)
         except ValueError:
             continue
+        if entry.get("type") == "ai-title" and entry.get("aiTitle"):
+            info.title = entry["aiTitle"]
         if entry.get("isSidechain") or entry.get("type") not in ("user", "assistant"):
             continue
         stamp = entry.get("timestamp")
@@ -895,8 +898,12 @@ def session_dir(session):
 
 
 def read_transcript(session):
+    return read_transcript_file(session_dir(session) + ".jsonl")
+
+
+def read_transcript_file(path):
     try:
-        with open(session_dir(session) + ".jsonl", "rb") as handle:
+        with open(path, "rb") as handle:
             size = handle.seek(0, os.SEEK_END)
             handle.seek(max(0, size - TAIL_BYTES))
             data = handle.read()
@@ -1021,7 +1028,8 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 continue
             if verdict.bucket == HIDDEN:
                 continue
-            label = session_label(workspace, terminal.get("title"), shared)
+            # A resumed session has no terminal title until its next turn: its transcript has it.
+            label = session_label(workspace, terminal.get("title") or transcript.title, shared)
             since = transcript.last_ts or (session and (session.get("statusUpdatedAt") or 0) / 1000) or None
             said, activity = transcript.last_text, transcript.last_ts_raw
             # A question an earlier tick asked: show it, and date it from then so later ticks
@@ -1377,6 +1385,57 @@ def release_binding(terminal_id):
                            " where end_reason = ? and terminal_id = ?", (PAUSED_REASON,))
 
 
+def binding_session(terminal_id):
+    """The Claude session id a terminal held, from the host database."""
+    for path in host_db_paths():
+        try:
+            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=1)
+            try:
+                row = connection.execute("select agent_session_id from terminal_agent_bindings where terminal_id = ?"
+                                         " order by started_at desc limit 1", (terminal_id,)).fetchone()
+            finally:
+                connection.close()
+        except sqlite3.Error:
+            continue
+        if row and row[0]:
+            return row[0]
+    return None
+
+
+def session_title(session_id):
+    """The last title Claude Code gave this session, read from its transcript."""
+    for path in glob.glob(os.path.join(CONFIG.claude, "projects", "*", f"{session_id}.jsonl")):
+        return read_transcript_file(path).title
+    return ""
+
+
+def retitle(session_id, title, timeout=60, sleep=time.sleep):
+    """Put the session's title back on its terminal once the resumed Claude is up.
+
+    Claude Code only sends its title to the terminal after a turn, so a resumed pane reads "Claude"
+    until you talk to it. Writing the title escape to the session's tty sets it the way Claude does."""
+    if not (session_id and title):
+        return False
+    safe = re.sub(r"[\x00-\x1f\x7f]", "", title)
+    for _ in range(timeout):
+        for path in glob.glob(os.path.join(CONFIG.claude, "sessions", "*.json")):
+            data = _load_json(path)
+            if data.get("sessionId") != session_id or not data.get("pid"):
+                continue
+            tty = subprocess.run(["/bin/ps", "-o", "tty=", "-p", str(data["pid"])],
+                                 capture_output=True, text=True, timeout=5).stdout.strip()
+            if not tty or tty.startswith("?"):
+                continue
+            try:
+                with open(f"/dev/{tty}", "w") as handle:
+                    handle.write(f"\x1b]0;{safe}\x07")
+                return True
+            except OSError:
+                continue
+        sleep(1)
+    return False
+
+
 def resume(workspace_id, terminal_id):
     """Have Paradev resume the session the way it does when you look at the dead pane.
 
@@ -1387,12 +1446,20 @@ def resume(workspace_id, terminal_id):
     host = host_of(terminal_id)
     if not host:
         return False
+    session_id = binding_session(terminal_id)
     release_binding(terminal_id)
     try:
         result = host_call(host, "terminalAgents.resume", {"workspaceId": workspace_id, "terminalId": terminal_id})
     except (OSError, ValueError, KeyError, TypeError):
         return False
-    return bool(result and result.get("resumed"))
+    resumed = bool(result and result.get("resumed"))
+    title = session_title(session_id) if resumed and session_id else ""
+    if title:
+        # In the background: the new Claude takes a few seconds to start, and the menu should not wait.
+        subprocess.Popen([sys.executable, "-B", os.path.realpath(__file__), "retitle", session_id, title],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
+    return resumed
 
 
 def pause(terminal_ids, sessions=None, table=None, kill=os.kill, hold=None, now=None):
@@ -1479,6 +1546,9 @@ def main(argv, plugin):
     if argv[:1] == ["resume"] and len(argv) > 2:
         resume(argv[1], argv[2])
         open_workspace(argv[1], argv[3] if len(argv) > 3 else "")
+        return 0
+    if argv[:1] == ["retitle"] and len(argv) > 2:
+        retitle(argv[1], argv[2])
         return 0
     if argv[:1] == ["pause"]:
         save_paused(pause(argv[1:], now=now), now)
