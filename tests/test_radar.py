@@ -1002,13 +1002,25 @@ class Render(Base):
         self.assertIn("Other projects  ·  1", top)
         self.assertIn("--🟡  a", [line.split(" | ")[0] for line in out.splitlines()])
         self.assertIn('param1="unfocus"', out)
-        self.assertNotIn('param1="focus"', out)
-
-    def test_focus_menu_offers_each_project_and_duration(self):
-        out = ar.render(ar.Radar(rows=[self.row(project="acme"), self.row(project="side")]), "/p", NOW)
+        # Only another project can take the focus.
         focus = [line for line in out.splitlines() if 'param1="focus"' in line]
-        self.assertEqual(len(focus), 2 * len(ar.snooze_choices(NOW)))
-        self.assertIn('param2="side"', focus[-1])
+        self.assertTrue(focus)
+        self.assertTrue(all('param2="acme"' in line for line in focus))
+
+    def test_project_header_offers_focus_and_ignore_with_each_duration(self):
+        out = ar.render(ar.Radar(rows=[self.row(project="acme"), self.row(project="side")]), "/p", NOW).splitlines()
+        self.assertNotIn("Focus on this project", self.top_level("\n".join(out)))
+        header = next(i for i, line in enumerate(out) if line.startswith("SIDE  ·  1"))
+        self.assertIn("refresh=true", out[header])
+        submenu = []
+        for line in out[header + 1:]:
+            if not line.startswith("--") or line.startswith("---") and not line.startswith("----"):
+                break
+            submenu.append(line)
+        for action in ("focus", "ignore"):
+            lines = [line for line in submenu if f'param1="{action}"' in line]
+            self.assertEqual(len(lines), len(ar.snooze_choices(NOW)))
+            self.assertTrue(all('param2="side"' in line for line in lines))
 
     def test_ignored_project_leaves_the_count_and_folds_away(self):
         rows = [self.row(project="acme", label="a"), self.row(project="side", label="b"),
@@ -1020,9 +1032,10 @@ class Render(Base):
         self.assertIn("Ignored projects  ·  2", top)
         self.assertIn("--SIDE  ·  2", [line.split(" | ")[0] for line in out.splitlines()])
         self.assertIn('param1="unignore" param2="side"', out)
-        ignore = [line for line in out.splitlines() if 'param1="ignore"' in line]
-        self.assertEqual(len(ignore), len(ar.snooze_choices(NOW)))
-        self.assertIn('param2="acme"', ignore[0])
+        # An ignored project cannot be ignored again nor focused from its folded groups.
+        actions = [line for line in out.splitlines() if 'param1="ignore"' in line or 'param1="focus"' in line]
+        self.assertEqual(len(actions), 2 * len(ar.snooze_choices(NOW)))
+        self.assertTrue(all('param2="acme"' in line for line in actions))
 
     def test_ignoring_everything_reads_as_inbox_zero(self):
         out = ar.render(ar.Radar(rows=[self.row()]), "/p", NOW, ignored={"acme": NOW + 3600})

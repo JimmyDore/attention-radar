@@ -121,11 +121,11 @@ TEXTS = {
         "check": "TO CHECK  ·  no activity for {minutes} min",
         "snoozed": "Snoozed ({count})",
         "legend": "Legend",
-        "focus": "Focus on a project",
+        "focus": "Focus on this project",
         "focus_on": "Focus: {project} until {time}",
         "unfocus": "Stop focusing",
         "others": "Other projects  ·  {count}",
-        "ignore": "Ignore a project",
+        "ignore": "Ignore this project",
         "ignored": "Ignored projects  ·  {count}",
         "ignored_until": "{project} until {time}",
         "unignore": "Stop ignoring",
@@ -154,11 +154,11 @@ TEXTS = {
         "check": "À VÉRIFIER  ·  plus d'activité depuis {minutes} min",
         "snoozed": "Snoozées ({count})",
         "legend": "Légende",
-        "focus": "Focus sur un projet",
+        "focus": "Focus sur ce projet",
         "focus_on": "Focus : {project} jusqu'à {time}",
         "unfocus": "Arrêter le focus",
         "others": "Autres projets  ·  {count}",
-        "ignore": "Ignorer un projet",
+        "ignore": "Ignorer ce projet",
         "ignored": "Projets ignorés  ·  {count}",
         "ignored_until": "{project} jusqu'à {time}",
         "unignore": "Ne plus ignorer",
@@ -1153,8 +1153,23 @@ def _row_lines(row, plugin, now, mark, depth=0):
     return lines
 
 
-def _groups(rows, plugin, now, depth=0):
-    """Rows grouped by project, the project holding the most urgent row first."""
+def _project_actions(project, plugin, now, depth, focus=None):
+    """Focus and Ignore, under the project's own header, each with its durations."""
+    p = "--" * depth
+    lines = []
+    for action, icon in (("focus", "scope"), ("ignore", "eye.slash")):
+        if action == "focus" and project == focus:
+            continue
+        lines.append(f"{p}--{text(action)} | sfimage={icon} refresh=true {FLAGS}")
+        for choice, until in snooze_choices(now):
+            lines.append(f"{p}----{choice} | {_params(plugin, action, project, int(until))} refresh=true {FLAGS}")
+    return lines
+
+
+def _groups(rows, plugin, now, depth=0, focus=None, actions=True):
+    """Rows grouped by project, the project holding the most urgent row first.
+
+    actions puts Focus and Ignore under each project header; an ignored project's groups go without."""
     p = "--" * depth
     needs = [r for r in rows if r.verdict.bucket == NEEDS]
     checks = [r for r in rows if r.verdict.bucket == CHECK]
@@ -1167,12 +1182,16 @@ def _groups(rows, plugin, now, depth=0):
         if index:
             lines.append(f"{p}---")
         pausable = [r.terminal_id for r in members if r.pausable]
+        submenu = []
+        if pausable:
+            submenu.append(f"{p}--{text('pause_all', count=len(pausable))} | sfimage=pause.circle "
+                           f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
+        if actions and project:
+            submenu += _project_actions(project, plugin, now, depth, focus)
         # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
         lines.append(f"{p}{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY}"
-                     f"{' refresh=true' if pausable else ''} {FLAGS}")
-        if pausable:
-            lines.append(f"{p}--{text('pause_all', count=len(pausable))} | sfimage=pause.circle "
-                         f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
+                     f"{' refresh=true' if submenu else ''} {FLAGS}")
+        lines += submenu
         for row in members:
             lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
     if checks:
@@ -1218,7 +1237,7 @@ def _ignored_lines(ignored, rows, lost, plugin, now):
     if rows or lost:
         lines.append("-----")
     lines += _interrupted_lines(lost, plugin, depth=1) + (["-----"] if lost and rows else [])
-    return lines + _groups(rows, plugin, now, depth=1)
+    return lines + _groups(rows, plugin, now, depth=1, actions=False)
 
 
 def _paused_lines(rows, plugin):
@@ -1280,12 +1299,12 @@ def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
     lines += _next_lines(next_row(shown, last_project), plugin)
     if lost:
         lines += _interrupted_lines(lost, plugin) + (["---"] if shown else [])
-    lines += _groups(shown, plugin, now)
+    lines += _groups(shown, plugin, now, focus=project)
     if others or lost_others:
         count = sum(r.verdict.bucket == NEEDS for r in others) + len(lost_others)
         lines += ["---", f"{text('others', count=count)} | refresh=true {FLAGS}"]
         lines += _interrupted_lines(lost_others, plugin, depth=1) + (["-----"] if lost_others and others else [])
-        lines += _groups(others, plugin, now, depth=1)
+        lines += _groups(others, plugin, now, depth=1, focus=project)
     if radar.snoozed:
         lines += ["---", f"{text('snoozed', count=len(radar.snoozed))} | sfimage=moon.zzz refresh=true {FLAGS}"]
         for row in radar.snoozed:
@@ -1294,15 +1313,6 @@ def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
     lines += _paused_lines(radar.paused, plugin)
     lines += _ignored_lines(ignored, [r for r in radar.rows if r.project in ignored],
                             [r for r in radar.interrupted if r.project in ignored], plugin, now)
-    projects = list(dict.fromkeys(r.project for r in rows + interrupted if r.project))
-    for action, label, icon in (("focus", "focus", "scope"), ("ignore", "ignore", "eye.slash")):
-        if not projects or (action == "focus" and focus):
-            continue
-        lines += ["---", f"{text(label)} | sfimage={icon} refresh=true {FLAGS}"]
-        for name in projects:
-            lines.append(f"--{_safe(name)} | {FLAGS}")
-            for choice, until in snooze_choices(now):
-                lines.append(f"----{choice} | {_params(plugin, action, name, int(until))} refresh=true {FLAGS}")
     lines += ["---", f"{text('legend')} | size=11 color={GREY} refresh=true {FLAGS}"]
     lines += [f"--{mark}  {label} | {FLAGS}" for mark, label in zip(MARKS, text("urgency"))]
     return "\n".join(lines)
