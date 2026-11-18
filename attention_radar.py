@@ -118,7 +118,7 @@ TEXTS = {
         "until_next": "Until its next message",
         "tomorrow": "Tomorrow {hour}:00",
         "inbox_zero": "Inbox zero",
-        "check": "TO CHECK  ·  no activity for {minutes} min",
+        "check": "to check: silent for {minutes} min",
         "snoozed": "Snoozed ({count})",
         "legend": "Legend",
         "focus": "Focus on this project",
@@ -151,7 +151,7 @@ TEXTS = {
         "until_next": "Jusqu'à son prochain message",
         "tomorrow": "Demain {hour} h",
         "inbox_zero": "Inbox zéro",
-        "check": "À VÉRIFIER  ·  plus d'activité depuis {minutes} min",
+        "check": "à vérifier : silencieuse depuis {minutes} min",
         "snoozed": "Snoozées ({count})",
         "legend": "Légende",
         "focus": "Focus sur ce projet",
@@ -1175,8 +1175,12 @@ def _groups(rows, plugin, now, depth=0, focus=None, actions=True):
     checks = [r for r in rows if r.verdict.bucket == CHECK]
     groups, lines = {}, []
     # Dialogs and failures first, then oldest first, so nothing rots at the bottom. A row opened
-    # since its last message goes last: it is being answered, not waiting.
+    # since its last message goes last: it is being answered, not waiting. A project with only
+    # silent sessions comes after every project that waits for you.
     for row in sorted(needs, key=lambda r: (r.opened, r.verdict.rank, r.since or 0)):
+        groups.setdefault(row.project, []).append(row)
+    # Silent sessions close their project's group: they do not wait for you, so they do not count.
+    for row in checks:
         groups.setdefault(row.project, []).append(row)
     for index, (project, members) in enumerate(groups.items()):
         if index:
@@ -1188,17 +1192,14 @@ def _groups(rows, plugin, now, depth=0, focus=None, actions=True):
                            f"{_params(plugin, 'pause', *pausable)} refresh=true {FLAGS}")
         if actions and project:
             submenu += _project_actions(project, plugin, now, depth, focus)
+        waiting = sum(r.verdict.bucket == NEEDS for r in members)
         # refresh=true: a submenu parent needs an action of its own or SwiftBar greys it out.
-        lines.append(f"{p}{_safe(project.upper())}  ·  {len(members)} | size=11 color={GREY}"
+        lines.append(f"{p}{_safe(project.upper())}{f'  ·  {waiting}' if waiting else ''} | size=11 color={GREY}"
                      f"{' refresh=true' if submenu else ''} {FLAGS}")
         lines += submenu
         for row in members:
-            lines += _row_lines(row, plugin, now, MARKS[urgency(row, now)], depth)
-    if checks:
-        heading = text("check", minutes=CONFIG.stale_after_minutes)
-        lines += [f"{p}---", f"{p}{heading} | size=11 color={GREY} {FLAGS}"]
-        for row in checks:
-            lines += _row_lines(row, plugin, now, "⏳", depth)
+            mark = MARKS[urgency(row, now)] if row.verdict.bucket == NEEDS else "⏳"
+            lines += _row_lines(row, plugin, now, mark, depth)
     return lines
 
 
@@ -1315,6 +1316,7 @@ def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
                             [r for r in radar.interrupted if r.project in ignored], plugin, now)
     lines += ["---", f"{text('legend')} | size=11 color={GREY} refresh=true {FLAGS}"]
     lines += [f"--{mark}  {label} | {FLAGS}" for mark, label in zip(MARKS, text("urgency"))]
+    lines.append(f"--⏳  {text('check', minutes=CONFIG.stale_after_minutes)} | {FLAGS}")
     return "\n".join(lines)
 
 

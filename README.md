@@ -32,7 +32,7 @@ Each row starts with what the session wants from you: `decisions N`, `approve`, 
 
 Rows are grouped by project. The dot shows how long a session has been waiting: 🟠 under 1 h, 🟡 1 to 24 h, ⚪ over 24 h (probably finished: delete the workspace).
 
-A hidden session that has shown no activity for 60 minutes moves to "To check" at the bottom of the menu, without raising the count. That catches a stuck shell or a subagent that hung.
+A hidden session that has shown no activity for 60 minutes moves to the end of its project's group with a ⏳, without raising the count. That catches a stuck shell or a subagent that hung.
 
 A session that ended its turn on "I'm waiting for X" with nothing running does count. No local signal separates it from a real question.
 
@@ -104,7 +104,7 @@ Everything has a default. To change something, create `~/.config/attention-radar
 | Key | Default | What it does |
 |---|---|---|
 | `language` | `"en"` | Menu language: `en` or `fr` |
-| `stale_after_minutes` | `60` | How long a running session can stay silent before it goes to "To check" |
+| `stale_after_minutes` | `60` | How long a running session can stay silent before it is marked ⏳ to check |
 | `morning_hour` | `9` | When "Snooze until tomorrow" ends |
 | `snooze_hours` | `[12, 18]` | Times offered as "Until …" in the snooze menu |
 | `ignore_projects` | `[]` | Paradev project names the radar skips |

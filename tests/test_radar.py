@@ -907,7 +907,20 @@ class Render(Base):
     def test_count_excludes_check_rows(self):
         out = ar.render(ar.Radar(rows=[self.row(), self.row(ar.CHECK)]), "/p", NOW)
         self.assertEqual(out.splitlines()[0], "1 | sfimage=tray.full")
-        self.assertIn("TO CHECK", out)
+        self.assertIn("⏳  feature-1", out)
+
+    def test_check_rows_close_their_project_group(self):
+        rows = [self.row(ar.CHECK, project="acme", label="a"), self.row(project="side", label="b"),
+                self.row(project="acme", label="c")]
+        top = self.top_level(ar.render(ar.Radar(rows=rows), "/p", NOW))
+        self.assertEqual(top[top.index("ACME  ·  1"):][:3], ["ACME  ·  1", "🟡  c", "⏳  a"])
+
+    def test_project_with_only_check_rows_gets_a_header_with_its_actions(self):
+        rows = [self.row(project="side", label="b"), self.row(ar.CHECK, project="acme", label="a")]
+        out = ar.render(ar.Radar(rows=rows), "/p", NOW)
+        top = self.top_level(out)
+        self.assertLess(top.index("SIDE  ·  1"), top.index("ACME"))
+        self.assertIn('param1="focus" param2="acme"', out)
 
     def test_zero_says_inbox_zero(self):
         self.assertIn("Inbox zero", ar.render(ar.Radar(), "/p", NOW))
