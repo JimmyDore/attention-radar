@@ -235,6 +235,7 @@ class Row:
     session_id: Optional[str] = None
     pane_id: str = ""
     opened: bool = False
+    opened_at: float = 0.0  # when you last opened its current message, 0 if not since it wrote
     agent: str = ""
     status: str = ""  # the Claude session's own status, empty when no session file matched
     topic: str = ""  # the orchestrated topic this session belongs to
@@ -1061,7 +1062,9 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 else:
                     row.reason = infer_reason(said)
                 row.hint = row.hint or row.excerpt
-            row.opened = (opened.get(terminal["id"]) or {}).get("activity") == row.activity
+            seen = opened.get(terminal["id"]) or {}
+            row.opened = seen.get("activity") == row.activity
+            row.opened_at = seen.get("at", 0.0) if row.opened else 0.0
             if verdict.bucket == NEEDS and is_snoozed(snoozes.get(terminal["id"]), row.activity, now):
                 radar.snoozed.append(row)
             else:
@@ -1111,11 +1114,15 @@ def _skip(row, plugin):
 
 def next_row(rows, last_project=None):
     """Where to go now: the oldest unopened row of the project you were last in, so you finish a
-    project before switching, else the oldest anywhere. Dialogs and failures come first either way."""
-    waiting = sorted((r for r in rows if r.verdict.bucket == NEEDS and not r.opened),
-                     key=lambda r: (r.verdict.rank, r.since or 0))
-    here = [r for r in waiting if last_project and r.project == last_project]
-    return (here or waiting or [None])[0]
+    project before switching, else the oldest anywhere. Dialogs and failures come first either way.
+    Once every row is opened and still waits, the one you looked at longest ago: Next never goes
+    away while something waits for you, and Skip sends a row to the back of that round."""
+    needs = [r for r in rows if r.verdict.bucket == NEEDS]
+    waiting = sorted((r for r in needs if not r.opened), key=lambda r: (r.verdict.rank, r.since or 0))
+    if waiting:
+        here = [r for r in waiting if last_project and r.project == last_project]
+        return (here or waiting)[0]
+    return min(needs, key=lambda r: (r.opened_at, r.verdict.rank, r.since or 0), default=None)
 
 
 def _next_lines(row, plugin):

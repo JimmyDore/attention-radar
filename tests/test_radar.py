@@ -976,11 +976,23 @@ class Render(Base):
         rows[1].opened = True
         self.assertEqual(ar.next_row(rows, "side").label, "a")
 
-    def test_next_skips_opened_check_and_handed_rows(self):
-        rows = [self.row(ar.CHECK, label="a"), self.row(ar.HANDED, label="b"), self.row(label="c")]
-        rows[2].opened = True
+    def test_next_skips_check_and_handed_rows(self):
+        rows = [self.row(ar.CHECK, label="a"), self.row(ar.HANDED, label="b")]
         self.assertIsNone(ar.next_row(rows))
         self.assertNotIn("Next:", ar.render(ar.Radar(rows=rows), "/p", NOW))
+
+    def test_next_prefers_unopened_rows(self):
+        rows = [self.row(since=NOW - 7200, label="a"), self.row(since=NOW - 600, label="b")]
+        rows[0].opened, rows[0].opened_at = True, NOW - 60
+        self.assertEqual(ar.next_row(rows).label, "b")
+
+    def test_next_comes_back_to_opened_rows_once_all_are_opened(self):
+        rows = [self.row(since=NOW - 7200, label="a"), self.row(since=NOW - 600, label="b")]
+        rows[0].opened, rows[0].opened_at = True, NOW - 60
+        rows[1].opened, rows[1].opened_at = True, NOW - 300
+        self.assertEqual(ar.next_row(rows).label, "b")
+        self.assertIn("Next: b", ar.render(ar.Radar(rows=rows), "/p", NOW))
+        self.assertNotIn("Inbox zero", ar.render(ar.Radar(rows=rows), "/p", NOW))
 
     def test_next_follows_focus(self):
         rows = [self.row(project="acme", since=NOW - 7200, label="a"), self.row(project="side", label="b")]
