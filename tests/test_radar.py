@@ -957,6 +957,14 @@ class Render(Base):
                 if not line.startswith("-") and after.startswith("--") and not after.startswith("---"):
                     self.assertTrue("refresh=true" in line or "param1=" in line, line)
 
+    def test_snoozed_rows_sit_under_their_project(self):
+        snoozed = [self.row(project="acme", label="a"), self.row(project="side", label="b"),
+                   self.row(project="acme", label="c")]
+        out = ar.render(ar.Radar(snoozed=snoozed), "/p", NOW).splitlines()
+        start = next(i for i, line in enumerate(out) if line.startswith("Snoozed (3)"))
+        names = [line.split(" | ")[0] for line in out[start + 1:start + 7]]
+        self.assertEqual(names, ["--ACME  ·  2", "--a", "--c", "-----", "--SIDE  ·  1", "--b"])
+
     def test_opened_row_goes_last_in_its_group(self):
         rows = [self.row(since=NOW - 600, label="a"), self.row(since=NOW - 7200, label="b")]
         rows[0].opened = True

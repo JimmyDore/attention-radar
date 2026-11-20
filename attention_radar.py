@@ -1315,9 +1315,14 @@ def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
         lines += _groups(others, plugin, now, depth=1, focus=project)
     if radar.snoozed:
         lines += ["---", f"{text('snoozed', count=len(radar.snoozed))} | sfimage=moon.zzz refresh=true {FLAGS}"]
+        groups = {}
         for row in radar.snoozed:
-            opener = _params(plugin, "open", row.workspace_id, row.pane_id)
-            lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
+            groups.setdefault(row.project, []).append(row)
+        for index, (name, members) in enumerate(groups.items()):
+            lines += (["-----"] if index else []) + [f"--{_safe(name.upper())}  ·  {len(members)} | size=11 color={GREY} {FLAGS}"]
+            for row in members:
+                opener = _params(plugin, "open", row.workspace_id, row.pane_id)
+                lines.append(f"--{_safe(row.label)} | {opener} refresh=false {FLAGS}")
     lines += _paused_lines(radar.paused, plugin)
     lines += _ignored_lines(ignored, [r for r in radar.rows if r.project in ignored],
                             [r for r in radar.interrupted if r.project in ignored], plugin, now)
