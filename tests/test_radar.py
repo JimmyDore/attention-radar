@@ -521,6 +521,32 @@ class Pause(Base):
         self.assertIn('param1="resume-paused"', out)
         self.assertIn('--feature-1 | bash="/p" param1="resume" param2="w1" param3="dead"', out)
 
+    def test_a_pause_older_than_the_crash_window_still_waits_under_paused(self):
+        """A session you paused stays there until you resume it: only crashes age out."""
+        import sqlite3
+        old = int((NOW - (ar.INTERRUPTED_DAYS + 2) * 86400) * 1000)
+        with tempfile.TemporaryDirectory() as folder:
+            os.makedirs(os.path.join(folder, "h"))
+            connection = sqlite3.connect(os.path.join(folder, "h", "host.db"))
+            connection.execute("create table terminal_agent_bindings (terminal_id text, workspace_id text, agent_id text,"
+                               " agent_session_id text, started_at integer, last_event_at integer, ended_at integer,"
+                               " end_reason text)")
+            later = old + 3_600_000
+            connection.executemany("insert into terminal_agent_bindings values (?, 'w1', 'claude', ?, ?, ?, ?, ?)",
+                                   [("dead", "s1", old, old, old, "paused"),
+                                    ("crashed", "s2", old, old, old, "terminal-exited"),
+                                    # paused, resumed in another pane, then closed for good, all long ago
+                                    ("was-held", "s3", old, old, old, "paused"),
+                                    ("closed", "s3", later, later, later, "disposed")])
+            connection.commit()
+            connection.close()
+            ar.configure(ar.Config(host_dbs=[os.path.join(folder, "*", "host.db")]))
+            bindings = ar.load_bindings(NOW)
+        self.assertEqual(sorted(b["terminal_id"] for b in bindings), ["closed", "dead", "was-held"])
+        radar = ar.build(snapshot(), {}, set(), {}, NOW, read=lambda s: t(), subagents=lambda s: None,
+                         bindings=bindings, paused={})
+        self.assertEqual(([r.terminal_id for r in radar.paused], radar.interrupted), (["dead"], []))
+
     def test_paused_grouped_by_project_each_resumable_at_once(self):
         def row(terminal, project):
             return ar.Row("w1", terminal, terminal, project, ar.Verdict(ar.INTERRUPTED), NOW, "", session_id=terminal)

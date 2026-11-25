@@ -242,6 +242,7 @@ class Row:
     role: str = ""  # "orchestrator" or "worker" within that topic
     reason: str = ""  # what it wants from you: "decisions 5", "approve", "question", "review"…
     hint: str = ""  # the first question or next step, shown on hover
+    held: bool = False  # its binding ended as paused: you paused it, however long ago
 
     @property
     def title(self):
@@ -619,6 +620,11 @@ def save_dismissed(session_id, now, path=None):
     _save_json(path, dismissed)
 
 
+def is_paused(row, paused):
+    """You paused it: the radar remembers the terminal, or host.db says its binding ended paused."""
+    return row.terminal_id in paused or row.held
+
+
 def load_paused(path=None):
     return _load_json(path or CONFIG.paused_file)
 
@@ -798,7 +804,9 @@ def load_failed_terminals():
 
 
 def load_bindings(now):
-    """Recent agent bindings: which session ran in which terminal, and how that ended."""
+    """Recent agent bindings: which session ran in which terminal, and how that ended.
+    A session paused at some point keeps all its bindings however old: whether it still waits for you
+    to resume it depends on its latest one. A crash waits only a week."""
     bindings = []
     since = (now - INTERRUPTED_DAYS * 86400) * 1000
     for path in host_db_paths():
@@ -808,8 +816,10 @@ def load_bindings(now):
             try:
                 rows = connection.execute(
                     "select terminal_id, workspace_id, agent_id, agent_session_id, started_at, last_event_at,"
-                    " ended_at, end_reason from terminal_agent_bindings where coalesce(ended_at, last_event_at) > ?",
-                    (since,),
+                    " ended_at, end_reason from terminal_agent_bindings"
+                    " where coalesce(ended_at, last_event_at) > ? or agent_session_id in"
+                    " (select agent_session_id from terminal_agent_bindings where end_reason = ?)",
+                    (since, PAUSED_REASON),
                 ).fetchall()
             finally:
                 connection.close()
@@ -847,6 +857,7 @@ def interrupted_rows(snapshot, bindings, dismissed=()):
                   workspace.get("project") or "", Verdict(INTERRUPTED), (binding["last_event_at"] or 0) / 1000,
                   "", session_id=session_id)
         row.agent = binding["agent_id"] or "claude"
+        row.held = binding["end_reason"] == PAUSED_REASON
         # The pane keeps the dead terminal's id: Paradev resumes the session there when it shows.
         row.pane_id = pane_ids(workspace).get(binding["terminal_id"], "")
         rows.append(row)
@@ -955,7 +966,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
           statuses=None):
     radar = Radar()
     for row in interrupted_rows(snapshot, bindings or [], dismissed or {}):
-        (radar.paused if row.terminal_id in (paused or {}) else radar.interrupted).append(row)
+        (radar.paused if is_paused(row, paused or {}) else radar.interrupted).append(row)
     orchestrators = orchestrators or {}
     opened = opened or {}
     serving = serving or set()
@@ -1630,7 +1641,7 @@ def main(argv, plugin):
         project = argv[1] if len(argv) > 1 else None
         paused = load_paused()
         for row in interrupted_rows(load_snapshot(), load_bindings(now), load_dismissed()):
-            if (row.terminal_id in paused) == (argv[0] == "resume-paused") and (project is None or row.project == project):
+            if is_paused(row, paused) == (argv[0] == "resume-paused") and (project is None or row.project == project):
                 resume(row.workspace_id, row.terminal_id)
                 time.sleep(2)  # one Claude at a time starting up, not twenty at once
         return 0
