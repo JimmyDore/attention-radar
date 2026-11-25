@@ -1538,8 +1538,14 @@ def open_workspace(workspace_id, pane_id=""):
 def load_snapshot():
     done = subprocess.run([CONFIG.cli, "snapshot", "--json"], capture_output=True, text=True, timeout=20)
     if done.returncode != 0:
-        raise RuntimeError(done.stderr.strip()[:200] or text("snapshot_failed"))
+        raise RuntimeError(cli_error(done.stderr) or text("snapshot_failed"))
     return json.loads(done.stdout)
+
+
+def cli_error(stderr):
+    """The CLI's error, with its "Run: superset ..." hint pointing at the binary we call,
+    since ~/.paradev/bin is usually not on PATH."""
+    return re.sub(r"\bRun: (?:superset|paradev)\b", lambda _: "Run: " + CONFIG.cli, stderr.strip())[:300]
 
 
 def load_radar(now):

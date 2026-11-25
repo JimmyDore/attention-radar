@@ -1226,5 +1226,15 @@ class Settings(Base):
         self.assertTrue(out.splitlines()[0].endswith("sfimage=tray.full"))
 
 
+class CliError(Base):
+    def test_hint_names_the_binary_the_radar_calls(self):
+        old, ar.CONFIG = ar.CONFIG, ar.Config(paradev_cli="/Users/me/.paradev/bin/superset")
+        try:
+            message = ar.cli_error("Error: Session expired\nHint: Run: superset auth login\n")
+        finally:
+            ar.CONFIG = old
+        self.assertEqual(message, "Error: Session expired\nHint: Run: /Users/me/.paradev/bin/superset auth login")
+
+
 if __name__ == "__main__":
     unittest.main()
