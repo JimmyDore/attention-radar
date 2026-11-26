@@ -30,6 +30,7 @@ CLI_NAMES = ["paradev", "superset"]
 
 TAIL_BYTES = 512 * 1024
 EXCERPT_CHARS = 90
+MESSAGE_CHARS = 6000  # a detail view shows the end of a long message: that is where the ask sits
 DIALOG_TOOLS = {"AskUserQuestion", "ExitPlanMode"}
 PLACEHOLDER_NAMES = {"local", "main"}
 RUNNING_STATUSES = {"busy", "shell"}
@@ -243,6 +244,7 @@ class Row:
     reason: str = ""  # what it wants from you: "decisions 5", "approve", "question", "review"…
     hint: str = ""  # the first question or next step, shown on hover
     held: bool = False  # its binding ended as paused: you paused it, however long ago
+    message: str = ""  # the whole text the row asks about, for a detail view (Raycast)
 
     @property
     def title(self):
@@ -648,13 +650,22 @@ def save_last_project(project, now, path=None):
     _save_json(path or CONFIG.last_project_file, {"project": project, "at": now})
 
 
-def save_opened(terminal_id, activity, now, path=None):
+def save_opened(terminal_id, activity, now, path=None, skipped=False):
     """Remember that this message was opened, so the row drops to the end of its group
-    until the session writes again, instead of waiting for the next refresh to clear it."""
+    until the session writes again, instead of waiting for the next refresh to clear it.
+    A skip goes the same way, marked so it does not count as the session you are looking at."""
     path = path or CONFIG.opened_file
     opened = {k: v for k, v in load_opened(path).items() if v.get("at", 0) > now - 86400}
-    opened[terminal_id] = {"activity": activity, "at": now}
+    opened[terminal_id] = {"activity": activity, "at": now, **({"skipped": True} if skipped else {})}
     _save_json(path, opened)
+
+
+def current_row(rows, opened):
+    """The session you are looking at, as far as the radar can tell: the last one you opened (from Next,
+    the menu or Raycast, not a skip), if it is still listed. Paradev does not say which pane is on screen."""
+    by_terminal = {r.terminal_id: r for r in rows}
+    seen = sorted(((v.get("at", 0), k) for k, v in opened.items() if not v.get("skipped")), reverse=True)
+    return next((by_terminal[k] for _, k in seen if k in by_terminal), None)
 
 
 def snooze_choices(now):
@@ -1055,6 +1066,7 @@ def build(snapshot, sessions, failed, snoozes, now, read=read_transcript, subage
                 since, excerpt(shown), activity, session_id,
             )
             row.pane_id = panes.get(terminal["id"], "")
+            row.message = shown[-MESSAGE_CHARS:]
             row.topic = (orchestrator.get("topic") or "topic") if orchestrator else topic
             row.role = role
             if orchestrator and orchestrator["inbox"]:
@@ -1184,22 +1196,28 @@ def _project_actions(project, plugin, now, depth, focus=None):
     return lines
 
 
+def grouped(rows):
+    """Rows by project, the project holding the most urgent row first.
+
+    Dialogs and failures first, then oldest first, so nothing rots at the bottom. A row opened
+    since its last message goes last: it is being answered, not waiting. A project with only
+    silent sessions comes after every project that waits for you."""
+    groups = {}
+    for row in sorted((r for r in rows if r.verdict.bucket == NEEDS), key=lambda r: (r.opened, r.verdict.rank, r.since or 0)):
+        groups.setdefault(row.project, []).append(row)
+    # Silent sessions close their project's group: they do not wait for you, so they do not count.
+    for row in rows:
+        if row.verdict.bucket == CHECK:
+            groups.setdefault(row.project, []).append(row)
+    return groups
+
+
 def _groups(rows, plugin, now, depth=0, focus=None, actions=True):
-    """Rows grouped by project, the project holding the most urgent row first.
+    """Rows grouped by project, see grouped().
 
     actions puts Focus and Ignore under each project header; an ignored project's groups go without."""
     p = "--" * depth
-    needs = [r for r in rows if r.verdict.bucket == NEEDS]
-    checks = [r for r in rows if r.verdict.bucket == CHECK]
-    groups, lines = {}, []
-    # Dialogs and failures first, then oldest first, so nothing rots at the bottom. A row opened
-    # since its last message goes last: it is being answered, not waiting. A project with only
-    # silent sessions comes after every project that waits for you.
-    for row in sorted(needs, key=lambda r: (r.opened, r.verdict.rank, r.since or 0)):
-        groups.setdefault(row.project, []).append(row)
-    # Silent sessions close their project's group: they do not wait for you, so they do not count.
-    for row in checks:
-        groups.setdefault(row.project, []).append(row)
+    groups, lines = grouped(rows), []
     for index, (project, members) in enumerate(groups.items()):
         if index:
             lines.append(f"{p}---")
@@ -1343,6 +1361,40 @@ def render(radar, plugin, now, focus=None, ignored=None, last_project=None):
     return "\n".join(lines)
 
 
+def _row_json(row, now, interrupted=False):
+    return {
+        "workspaceId": row.workspace_id, "terminalId": row.terminal_id, "paneId": row.pane_id,
+        "activity": row.activity, "sessionId": row.session_id or "", "project": row.project, "label": row.label,
+        "reason": row.reason, "hint": row.hint, "message": row.message, "since": row.since,
+        "waiting": interrupted or row.verdict.bucket == NEEDS, "urgency": urgency(row, now),
+        "opened": row.opened, "interrupted": interrupted, "pausable": row.pausable,
+    }
+
+
+def radar_json(radar, now, focus=None, ignored=None, last_project=None, opened=None):
+    """What the menu lists at the top, as data for another front end (the Raycast extension):
+    the same rows in the same order, the same count, and the same Next. current is the session
+    you opened last, wherever it is listed, to act on it from a hotkey."""
+    ignored = ignored or {}
+    project = focus["project"] if focus else None
+    shown = visible_rows(radar, focus, ignored)[1]
+    lost = [r for r in radar.interrupted if r.project not in ignored and (project is None or r.project == project)]
+    rows = [r for members in grouped(shown).values() for r in members]
+    nxt = next_row(shown, last_project)
+    current = current_row(radar.rows + radar.snoozed, opened or {})
+    return {
+        "count": sum(r.verdict.bucket == NEEDS for r in shown) + len(lost),
+        "warning": radar.warning,
+        "focus": focus,
+        "next": nxt.terminal_id if nxt else None,
+        "current": _row_json(current, now) | {"snoozed": current in radar.snoozed} if current else None,
+        "rows": [_row_json(r, now, interrupted=True) for r in lost] + [_row_json(r, now) for r in rows],
+        "snoozed": [_row_json(r, now) for r in radar.snoozed],
+        "snoozeChoices": [{"label": label, "until": int(until)}
+                          for label, until in [(text("until_next"), now + NEXT_MESSAGE)] + snooze_choices(now)],
+    }
+
+
 DEMO = [
     # (workspace, project, bucket, rank, minutes ago, last text)
     ("fix-login-redirect", "web-app", NEEDS, 0, 3, "Keep the session cookie, or move to a short-lived token?"),
@@ -1359,7 +1411,7 @@ def demo_radar(now):
     radar = Radar()
     for index, (name, project, bucket, rank, minutes, last) in enumerate(DEMO):
         row = Row(f"demo-{index}", f"demo-{index}", name, project, Verdict(bucket, rank), now - minutes * 60,
-                  excerpt(last), "demo")
+                  excerpt(last), "demo", message=last)
         radar.rows.append(row)
     radar.snoozed.append(Row("demo-s", "demo-s", "update-dependencies", "web-app", Verdict(NEEDS), now - 600, ""))
     return radar
@@ -1585,6 +1637,17 @@ def go_next(now):
     return 0
 
 
+def print_json(now):
+    """The radar as JSON on stdout. A broken radar prints {"error": …}, never an empty inbox."""
+    try:
+        radar = demo_radar(now) if CONFIG.demo else load_radar(now)
+    except Exception as error:
+        print(json.dumps({"error": text("broken", error=error)}))
+        return 1
+    print(json.dumps(radar_json(radar, now, load_focus(now), load_ignored(now), load_last_project(), load_opened())))
+    return 0
+
+
 def doctor():
     """Print what the radar found, for a first install."""
     print(f"config file      {CONFIG_FILE} ({'found' if os.path.exists(CONFIG_FILE) else 'not found, defaults'})")
@@ -1611,10 +1674,15 @@ def main(argv, plugin):
     try:
         configure(load_config())
     except (OSError, ValueError, TypeError) as error:
+        if argv[:1] == ["json"]:
+            print(json.dumps({"error": f"attention-radar config: {error}"}))
+            return 1
         print(error_output(f"attention-radar config: {error}"))
         return 0
     if argv[:1] == ["doctor"]:
         return doctor()
+    if argv[:1] == ["json"]:
+        return print_json(now)
     if CONFIG.demo or argv[:1] == ["demo"]:
         print(render(demo_radar(now), plugin, now))
         return 0
@@ -1652,7 +1720,7 @@ def main(argv, plugin):
                 time.sleep(2)  # one Claude at a time starting up, not twenty at once
         return 0
     if argv[:1] == ["skip"] and len(argv) > 1:
-        save_opened(argv[1], argv[2] if len(argv) > 2 else "", now)
+        save_opened(argv[1], argv[2] if len(argv) > 2 else "", now, skipped=True)
         return 0
     if argv[:1] == ["snooze"]:
         until = float(argv[3]) if len(argv) > 3 and argv[3] else None

@@ -265,6 +265,18 @@ class Build(Base):
         radar = self.build(snapshot(term(), name="local"), {"t1": {"status": "idle", "sessionId": "s"}})
         self.assertEqual(radar.rows[0].label, "Un titre")
 
+    def test_row_keeps_the_whole_message_for_a_detail_view(self):
+        text_ = "Long intro.\n\n" + "x" * 300 + "\n\nShip it?"
+        row = self.build(snapshot(term()), {"t1": {"status": "idle", "sessionId": "s"}},
+                         transcript=t(last_ts=NOW, last_ts_raw="r", last_text=text_)).rows[0]
+        self.assertEqual(row.message, text_)
+        self.assertEqual(row.excerpt, "Ship it?")
+
+    def test_open_dialog_message_is_the_dialog(self):
+        transcript = t(last_ts=NOW, last_text="old", dialog_text="red or blue?", open_dialog=True)
+        radar = self.build(snapshot(term()), {"t1": {"status": "waiting", "sessionId": "s"}}, transcript=transcript)
+        self.assertEqual(radar.rows[0].message, "red or blue?")
+
     def test_open_dialog_shows_its_question_not_the_last_text(self):
         transcript = t(last_ts=NOW, last_text="old", dialog_text="red or blue?", open_dialog=True)
         radar = self.build(snapshot(term()), {"t1": {"status": "waiting", "sessionId": "s"}}, transcript=transcript)
@@ -1111,6 +1123,95 @@ class Render(Base):
     def test_text_cannot_break_the_swiftbar_line(self):
         for current in ar.render(ar.Radar(rows=[self.row()]), "/p", NOW).splitlines():
             self.assertLessEqual(current.count("|"), 1)
+
+
+class Json(Base):
+    def row(self, terminal="t1", bucket=ar.NEEDS, project="acme", since=NOW - 7200, rank=1, opened=False):
+        row = ar.Row("w1", terminal, terminal, project, ar.Verdict(bucket, rank), since, "end", "r", pane_id="p1",
+                     reason="question", hint="Ship it?", message="Intro.\n\nShip it?")
+        row.opened = opened
+        return row
+
+    def test_rows_come_in_menu_order_with_what_raycast_needs(self):
+        rows = [self.row("a", since=NOW - 60), self.row("b", ar.CHECK), self.row("c", since=NOW - 600, opened=True),
+                self.row("d", since=NOW - 7200)]
+        data = ar.radar_json(ar.Radar(rows=rows), NOW)
+        self.assertEqual([r["terminalId"] for r in data["rows"]], ["d", "a", "c", "b"])
+        self.assertEqual(data["count"], 3)
+        self.assertEqual(data["next"], "d")
+        first = data["rows"][0]
+        self.assertEqual((first["workspaceId"], first["paneId"], first["activity"], first["project"]),
+                         ("w1", "p1", "r", "acme"))
+        self.assertEqual((first["reason"], first["hint"], first["message"]), ("question", "Ship it?", "Intro.\n\nShip it?"))
+        self.assertEqual((first["waiting"], first["urgency"], first["since"]), (True, 2, NOW - 7200))
+        self.assertFalse(data["rows"][3]["waiting"])
+        json.dumps(data)
+
+    def test_interrupted_sessions_count_like_in_the_menu(self):
+        lost = self.row("x")
+        data = ar.radar_json(ar.Radar(rows=[self.row("a")], interrupted=[lost]), NOW)
+        self.assertEqual(data["count"], 2)
+        self.assertEqual([(r["terminalId"], r["interrupted"]) for r in data["rows"]], [("x", True), ("a", False)])
+
+    def test_focus_and_ignored_projects_filter_like_the_menu(self):
+        rows = [self.row("a", project="acme"), self.row("b", project="side"), self.row("c", project="noise")]
+        data = ar.radar_json(ar.Radar(rows=rows), NOW, {"project": "side", "until": NOW + 60}, {"noise": NOW + 60})
+        self.assertEqual([r["terminalId"] for r in data["rows"]], ["b"])
+        self.assertEqual(data["focus"], {"project": "side", "until": NOW + 60})
+
+    def test_snooze_choices_start_with_until_next_message(self):
+        data = ar.radar_json(ar.Radar(snoozed=[self.row("s")]), NOW)
+        self.assertEqual(data["snoozeChoices"][0], {"label": "Until its next message", "until": int(NOW + ar.NEXT_MESSAGE)})
+        self.assertEqual([r["terminalId"] for r in data["snoozed"]], ["s"])
+
+    def run_main(self, config):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "config.json")
+            with open(path, "w") as handle:
+                handle.write(config)
+            old, ar.CONFIG_FILE = ar.CONFIG_FILE, path
+            out = io.StringIO()
+            try:
+                with contextlib.redirect_stdout(out):
+                    code = ar.main(["json"], "/p")
+            finally:
+                ar.CONFIG_FILE = old
+        return code, json.loads(out.getvalue())
+
+    def test_main_prints_the_demo_radar_as_json(self):
+        code, data = self.run_main(json.dumps({"demo": True}))
+        self.assertEqual(code, 0)
+        self.assertEqual(data["count"], 5)
+        self.assertTrue(data["rows"][0]["message"])
+
+    def test_a_bad_config_is_a_json_error_not_an_empty_inbox(self):
+        code, data = self.run_main("{not json")
+        self.assertEqual(code, 1)
+        self.assertIn("config", data["error"])
+
+    def test_current_is_the_last_session_opened_not_skipped(self):
+        rows = [self.row("a"), self.row("b"), self.row("c")]
+        opened = {"a": {"at": NOW - 60}, "b": {"at": NOW - 10, "skipped": True}, "c": {"at": NOW - 600}, "gone": {"at": NOW}}
+        current = ar.radar_json(ar.Radar(rows=rows), NOW, opened=opened)["current"]
+        self.assertEqual((current["terminalId"], current["snoozed"]), ("a", False))
+        self.assertIsNone(ar.radar_json(ar.Radar(rows=rows), NOW)["current"])
+
+    def test_current_can_be_snoozed_or_outside_the_focus(self):
+        radar = ar.Radar(rows=[self.row("a", project="side")], snoozed=[self.row("s")])
+        focus = {"project": "acme", "until": NOW + 60}
+        self.assertEqual(ar.radar_json(radar, NOW, focus, opened={"a": {"at": NOW}})["current"]["terminalId"], "a")
+        self.assertTrue(ar.radar_json(radar, NOW, opened={"s": {"at": NOW}})["current"]["snoozed"])
+
+    def test_skip_is_saved_as_a_skip(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "o.json")
+            ar.save_opened("t1", "r", NOW, path, skipped=True)
+            self.assertEqual(ar.load_opened(path)["t1"], {"activity": "r", "at": NOW, "skipped": True})
+
+    def test_a_warning_is_passed_on(self):
+        self.assertEqual(ar.radar_json(ar.Radar(warning="boom"), NOW)["warning"], "boom")
 
 
 class Text(Base):

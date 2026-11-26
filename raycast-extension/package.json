@@ -1,0 +1,76 @@
+{
+  "$schema": "https://www.raycast.com/schemas/extension.json",
+  "name": "attention-radar",
+  "title": "Attention Radar",
+  "description": "The Claude Code sessions in Paradev that wait for you: read what each one asks, then open, skip or snooze it.",
+  "icon": "icon.png",
+  "author": "jimmydore",
+  "license": "MIT",
+  "categories": [
+    "Developer Tools"
+  ],
+  "commands": [
+    {
+      "name": "attention-radar",
+      "title": "Attention Radar",
+      "subtitle": "Paradev",
+      "description": "List the sessions waiting for you, with the whole message each one ends on.",
+      "mode": "view"
+    },
+    {
+      "name": "current-session",
+      "title": "Current Session",
+      "subtitle": "Attention Radar",
+      "description": "The session you opened last, to snooze it until its next message, skip it, pause it or move on to Next.",
+      "mode": "view"
+    },
+    {
+      "name": "next",
+      "title": "Next",
+      "subtitle": "Attention Radar",
+      "description": "Open the session the radar's Next points at.",
+      "mode": "no-view"
+    },
+    {
+      "name": "snooze-until-next-message",
+      "title": "Snooze Until Next Message",
+      "subtitle": "Attention Radar",
+      "description": "Snooze the session you opened last until it writes again.",
+      "mode": "no-view"
+    },
+    {
+      "name": "snooze-and-next",
+      "title": "Snooze and Next",
+      "subtitle": "Attention Radar",
+      "description": "Snooze the session you opened last until its next message, then open the next one.",
+      "mode": "no-view"
+    }
+  ],
+  "preferences": [
+    {
+      "name": "radarScript",
+      "title": "attention_radar.py",
+      "description": "The attention_radar.py of your attention-radar clone.",
+      "type": "file",
+      "required": true
+    }
+  ],
+  "dependencies": {
+    "@raycast/api": "^2.13.1",
+    "@raycast/utils": "^2.2.2"
+  },
+  "devDependencies": {
+    "@raycast/eslint-config": "^2.1.1",
+    "@types/node": "26.6.5",
+    "@types/react": "19.3.0",
+    "eslint": "^9.39.1",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "build": "ray build",
+    "dev": "ray develop",
+    "fix-lint": "ray lint --fix",
+    "lint": "ray lint"
+  }
+}

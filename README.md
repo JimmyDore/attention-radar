@@ -39,7 +39,7 @@ A session that ended its turn on "I'm waiting for X" with nothing running does c
 ## Using it
 
 - **→ Next** at the top of the menu says where to go now: the oldest session waiting in the project you last opened one in, so you finish a project before switching, else the oldest anywhere (in the focused project, if there is one). A dialog or a failed turn comes first. Click it to open that session; the next one takes its place.
-- To go to Next from the keyboard, bind the Raycast command **Next Paradev** to a hotkey (see [Install](#next-from-the-keyboard-raycast)).
+- To go to Next, read whole messages or snooze from the keyboard, use the Raycast extension (see [Raycast extension](#raycast-extension)).
 - Hover a row (or Next), then **Skip, come back later**: the row goes to the end of its group, out of Next, until the session writes again. Nothing opens.
 - Hover a row to open its workspace or snooze it.
 - Click a row to open its workspace in Paradev, on the right pane.
@@ -78,16 +78,31 @@ agent terminals  12, 12 linked to a Claude session
 
 To update, run `git pull`. The plugin is a link, so there's nothing to reinstall.
 
-### Next from the keyboard (Raycast)
-
-`raycast/next-paradev.sh` is a [Raycast](https://www.raycast.com) script command, **Next Paradev**. It opens the session Next points at without the mouse. It works Next out when you press it, so pressing twice in a row takes you to two different sessions. A toast says where it went, or "Inbox zero".
-
-1. In Raycast, open Settings → Extensions → Script Commands → **Add Directories**, and pick the repo's `raycast` folder.
-2. Find **Next Paradev** in the list and record a hotkey for it, for example ⌥⌘N.
-
-From a terminal, `python3 attention_radar.py next` does the same.
-
 The menu refreshes every 10 seconds. To change that, rename the link in the plugin folder, for example to `attention-radar.30s.py`.
+
+### Raycast extension
+
+`raycast-extension/` puts the radar in [Raycast](https://www.raycast.com), next to the menu. It runs `attention_radar.py`, so both always show the same sessions in the same order. It has five commands:
+
+- **Attention Radar** lists the waiting sessions by project, with the whole message each one ended on in the detail pane. Type to filter by name, project or ask. ↵ opens the session, ⌘S snoozes it until its next message, ⌘⇧S picks another snooze, ⌘→ skips it, ⌘N goes to Next, ⌘↵ snoozes it until its next message and then goes to Next. ⌘D hides the message so names get the full width.
+- **Current Session** shows the session you opened last, from Next, the menu or Raycast. ↵ snoozes it until its next message, ⌘↵ snoozes it and goes to Next, and the other actions are the same as in the list. Use it when Next took you to a session that didn't actually need you.
+- **Next** opens the session Next points at, with no window. It works Next out when you press it, so pressing twice takes you to two different sessions. A HUD says where it went, or "Inbox zero".
+- **Snooze Until Next Message** snoozes the current session until it writes again, with no window.
+- **Snooze and Next** does both: snoozes the current session, then opens the next one.
+
+"Current" means the last session you opened through the radar, not counting skips: Paradev doesn't say which pane is on screen. A session you went to straight from the Paradev sidebar doesn't count.
+
+You need Node 22 or later:
+
+```bash
+cd raycast-extension
+npm install
+npm run dev   # loads the extension into Raycast; stop it with Ctrl-C, the extension stays
+```
+
+The first time a command runs, Raycast asks for your `attention_radar.py`. Then bind hotkeys in Raycast's settings (Extensions → Attention Radar), for example ⌥⌘N for **Next**, ⌥⌘S for **Snooze Until Next Message** and ⌥⌘⇧S for **Snooze and Next**.
+
+From a terminal, `python3 attention_radar.py next` does what **Next** does.
 
 ## Configuration
 
@@ -161,6 +176,7 @@ The radar runs locally and makes no network calls, apart from Resume asking Para
 /usr/bin/python3 -B -m unittest discover -s tests
 /usr/bin/python3 -B attention_radar.py demo      # the menu SwiftBar would draw, with made-up sessions
 /usr/bin/python3 -B attention_radar.py           # the same with your real sessions
+/usr/bin/python3 -B attention_radar.py json      # the rows as JSON, for the Raycast extension
 ```
 
 ## License
